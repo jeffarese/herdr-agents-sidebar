@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The probe script is tested in every POSIX shell found.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends zsh
+      - run: npm test
+      - run: sh -n install.sh && python3 -m py_compile scripts/install.py

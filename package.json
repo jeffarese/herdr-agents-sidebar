@@ -1,0 +1,11 @@
+{
+  "name": "herdr-agents-sidebar",
+  "private": true,
+  "type": "module",
+  "description": "A Herdr mod: every agent and shell on all your machines in one sidebar, with background work and sub-agents",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "bench": "node scripts/bench.mjs"
+  }
+}

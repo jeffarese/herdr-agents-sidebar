@@ -1,0 +1,11 @@
+.DS_Store
+node_modules/
+__pycache__/
+*.pyc
+# Written by the Herdr app into every mod folder.
+**/gpui-kit.d.ts
+**/herdr.d.ts
+**/jsconfig.json
+*.error
+# Local scratch: type definitions and test homes.
+.qa/
