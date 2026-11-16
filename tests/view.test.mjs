@@ -667,3 +667,31 @@ test("the session you are in stays in view when its section is folded", () => {
   assert.ok(find(root, "agent-t1"));
   assert.equal(find(root, "agent-t2"), null);
 });
+
+test("with only this computer there is no host heading, and its + moves to the title bar", () => {
+  // Folded while a second machine was connected: that must not hide every session now.
+  const h = setup({}, { folded: JSON.stringify(["local"]) });
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.terminals = h.state.terminals.filter(row => row.address === "t1");
+  let root = h.view.render();
+  const list = find(root, "host-agent-list");
+  assert.equal(find(list, "host-local"), null);
+  assert.match(list.nodes[0].props.id, /^section-local:/);
+  assert.equal(list.nodes[1].props.id, "agent-t1");
+  assert.deepEqual(h.order(), ["t1"]);
+  assert.equal(list.props.accessibility_label, "Sessions grouped by status");
+  assert.doesNotMatch(h.view.tip(h.view.rows[0], Date.now()), /This computer/);
+  find(root, "new-local").props.on_click(null, h.cx);
+  assert.equal(h.overlays.at(-1).props.machine, null);
+  // The rail keeps a + of its own at the top of the list.
+  h.view.width = 76;
+  root = h.view.render();
+  assert.equal(find(root, "host-local"), null);
+  assert.ok(find(find(root, "host-agent-list").nodes[0], "new-local"));
+  // A second machine brings the headings back.
+  h.state.machines.push({ name: "work", layout: "ready" });
+  h.view.width = 320;
+  root = h.view.render();
+  assert.ok(find(root, "host-local"));
+  assert.ok(find(root, "host-remote:work"));
+});

@@ -7,6 +7,7 @@ import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
 const ART = "mods/agent-sidebar/";
 const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
+const hostState = host => host.layout === "ready" ? "" : host.layout === "loading" ? "Connecting…" : "Unavailable";
 // Below this width the sidebar is a rail of icons.
 const RAIL = 210;
 const WIDE = 320;
@@ -224,7 +225,8 @@ export default class AgentSidebar extends View {
   }
 
   tip(row, now) {
-    const host = row.machine == null ? "Local · This computer" : `Remote · ${row.machine}`;
+    // With one machine there is nothing to tell apart.
+    const host = this.single ? "" : row.machine == null ? "Local · This computer" : `Remote · ${row.machine}`;
     const kind = row.inner ? (row.inBackground ? "Sub-agent, in the background" : "Sub-agent")
       : row.kind === "shell" ? "Shell" : row.kind === "process" ? "Program" : "Agent";
     const context = [...new Set([kind, row.space === row.title ? "" : row.space, row.program?.name].filter(Boolean))].join(" · ");
@@ -367,11 +369,10 @@ export default class AgentSidebar extends View {
     ].filter(Boolean);
   }
 
-  host(t, group, compact, first) {
-    const open = this.isOpen(group.key);
-    const color = group.remote ? t.ansi4 : t.accent;
-    const state = group.layout === "ready" ? "" : group.layout === "loading" ? "Connecting…" : "Unavailable";
-    const add = div().id(`new-${group.key}`).size(22).flex_none().rounded(5).flex().items_center().justify_center()
+  // A machine's +: the launcher for a shell or an agent there.
+  newButton(t, group, size = 22) {
+    const state = hostState(group);
+    return div().id(`new-${group.key}`).size(size).flex_none().rounded(5).flex().items_center().justify_center()
       .role("button").accessibility_label(`New session on ${group.label}`)
       .text_color(state ? t.dim : t.muted).tooltip(state ? `Cannot start a session: ${state}` : `New shell or agent on ${group.label}`)
       .when(!state, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)))
@@ -379,6 +380,13 @@ export default class AgentSidebar extends View {
         cx.stop_propagation();
         this.launch(group.name ?? null);
       }).child(glyph("plus", 14));
+  }
+
+  host(t, group, compact, first) {
+    const open = this.isOpen(group.key);
+    const color = group.remote ? t.ansi4 : t.accent;
+    const state = hostState(group);
+    const add = this.newButton(t, group);
     const label = `${group.remote ? "Remote" : "Local"} host ${group.label}, ${counts(group.rows).all} sessions${state ? `, ${state}` : ""}, ${open ? "expanded" : "collapsed"}`;
     const root = h_flex().id(`host-${group.key}`).flex_none().items_center()
       .role("button").accessibility_label(label).cursor_pointer()
@@ -444,6 +452,9 @@ export default class AgentSidebar extends View {
     const tally = counts(all);
     const sections = groups(all, hosts, this.query, this.filter);
     const compact = this.width < RAIL;
+    // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
+    this.single = !hosts.some(host => host.name != null);
+    const local = { layout: "loading", ...hosts.find(host => host.name == null), name: null, key: "local", label: "This computer" };
     this.visible = [];
     this.positions = new Map();
     const children = [];
@@ -452,9 +463,11 @@ export default class AgentSidebar extends View {
       this.visible.push(row);
       children.push(node);
     };
+    if (this.single && compact) children.push(h_flex().h(30).flex_none().justify_center().items_center().child(this.newButton(t, local)));
     sections.forEach((group, i) => {
-      children.push(this.host(t, group, compact, i === 0));
-      if (!this.isOpen(group.key)) return;
+      if (!this.single) children.push(this.host(t, group, compact, i === 0));
+      // A host folded back when there were several must not hide everything now.
+      if (!this.single && !this.isOpen(group.key)) return;
       if (compact) {
         // Sub-agents stay in their session's tooltip: in a rail they would pass for sessions.
         for (const row of group.rows) if (!row.inner) add(row, this.railRow(t, row));
@@ -467,7 +480,7 @@ export default class AgentSidebar extends View {
         const open = this.isOpen(`${group.key}:${section.id}`);
         for (const entry of section.entries) if (open || entry.row.focused) add(entry.row, this.row(t, entry, section.id, now));
       }
-      if (!group.rows.length) children.push(div().pl(29).pr(12).pt(2).pb(6).text_size(11).text_color(t.muted)
+      if (!group.rows.length) children.push(div().pl(this.single ? 10 : 29).pr(12).pt(2).pb(6).text_size(11).text_color(t.muted)
         .child(group.layout === "ready" ? "No sessions yet · use + to start one" : group.layout === "loading" ? "Loading sessions…" : "Sessions appear when this host reconnects"));
     });
     // Not while searching or filtering: there the list is results.
@@ -506,13 +519,14 @@ export default class AgentSidebar extends View {
           .child(div().font_semibold().text_size(15).child("Sessions"))
           .child(div().text_size(12).text_color(t.muted).child(String(tally.all)))
           .child(div().flex_1())
+          .when(this.single, el => el.child(this.newButton(t, local, 26)))
           .child(this.settingsButton(t)))
         .child(this.search(t))
         .child(this.chips(t, tally)))
       .when(compact, el => el.child(h_flex().h(34).flex_none().justify_center().items_center()
         .child(iconButton("expand-agents", "panel-left", "Expand sessions", () => this.expand()))))
       .child(v_flex().id("host-agent-list").flex_1().min_h(0).px(6).pt(compact ? 0 : 2).pb(12).overflow_y_scrollbar().track_scroll(this.scroll)
-        .role("list_box").accessibility_label("Sessions grouped by machine, then by status")
+        .role("list_box").accessibility_label(this.single ? "Sessions grouped by status" : "Sessions grouped by machine, then by status")
         .children(children)
         .when(!sections.length && !compact, el => el.child(empty)));
   }

@@ -102,6 +102,9 @@ and a button at its top widens it again.
 
 ### Sections and marks
 
+With only this computer connected there are no machine headings, and its **+** sits beside
+Settings in the title bar.
+
 Each machine lists its sessions in the sections Herdr's Agents list uses, most urgent first:
 
 | Section | Mark | What it means |
