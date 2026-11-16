@@ -154,6 +154,20 @@ export function holdDone(rows, before) {
   return rows;
 }
 
+// A session on its way out. Herdr drops a closed pane at once but lists its terminal until the
+// core says it ended, a moment later; in between the row has lost its pane's folder, title and
+// status, and would jump to another place before it goes. So it goes at once instead.
+// `leaving`: address → when it started going (its ✕ clicked here, or its pane gone since the last
+// render); `placed`: the terminals that had a pane then, `now` those that have one now. A terminal
+// still listed after LEAVE_MS stayed on purpose (parked) and comes back. Changes `leaving`.
+export const LEAVE_MS = 2500;
+export function dropLeaving(rows, leaving, placed, panes, now = Date.now()) {
+  const present = new Set(rows.map(row => row.address));
+  for (const address of placed) if (!panes.has(address) && present.has(address) && !leaving.has(address)) leaving.set(address, now);
+  for (const [address, at] of leaving) if (!present.has(address) || now - at > LEAVE_MS) leaving.delete(address);
+  return leaving.size ? rows.filter(row => !leaving.has(row.inner ? row.terminal : row.address)) : rows;
+}
+
 // The tooltip's account of background work, one line each.
 export function backgroundLines(row, now = Date.now()) {
   const cut = (text, n) => text.length > n ? `${text.slice(0, n - 1)}…` : text;

@@ -654,6 +654,31 @@ test("✕ takes two deliberate clicks: a stray or double click never closes a se
   assert.deepEqual(model.closeAction({ available: true, address: "t9", background: [] }), { name: "terminal.kill", args: { terminal: "t9" } });
 });
 
+test("a closed session goes at once, never jumping elsewhere while Herdr still lists its terminal", () => {
+  const h = setup();
+  h.state.terminals.push({ address: "t2", state: "live", status: "idle", title: "Other task", program: { name: "Claude", agent: true } });
+  h.state.panes = [{ pane: "p1", tab: "a1", terminal: "t1", cwd: "/x" }, { pane: "p2", tab: "a1", terminal: "t2", cwd: "/y" }];
+  const click = id => find(h.view.render(), id).props.on_click(null, h.cx);
+  find(h.view.render(), "agent-t1").props.on_hover(true, h.cx);
+  click("close-t1");
+  h.view.armed.at -= 1000;
+  click("close-t1");
+  assert.deepEqual(h.commands, [{ name: "pane.close", args: { pane: "p1" } }]);
+  // Herdr has dropped the pane but still lists the terminal: the row is gone already.
+  h.state.panes = h.state.panes.filter(pane => pane.pane !== "p1");
+  assert.equal(find(h.view.render(), "agent-t1"), null);
+  assert.ok(find(h.view.render(), "agent-t2"));
+  // Its pane closed elsewhere (⌘W): gone at the first render without it, too.
+  h.state.panes = [];
+  assert.equal(find(h.view.render(), "agent-t2"), null);
+  // Still listed long after (parked, not closed): it comes back.
+  for (const [address] of h.view.leaving) h.view.leaving.set(address, Date.now() - model.LEAVE_MS - 1);
+  const root = h.view.render();
+  assert.ok(find(root, "agent-t1"));
+  assert.ok(find(root, "agent-t2"));
+  assert.equal(h.view.leaving.size, 0);
+});
+
 test("a sub-agent inside a session, or one on a machine that is away, has no ✕", () => {
   assert.equal(model.closeAction({ available: true, inner: true, background: [] }), null);
   assert.equal(model.closeAction({ available: false, background: [] }), null);

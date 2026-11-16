@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone } from "./model.js";
+import { build, groups, counts, WORDS, BACKGROUND, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
 import { PROBE, PROBE_MS, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
@@ -65,6 +65,9 @@ export default class AgentSidebar extends View {
     // Key (host, section, folder or row) → where it was drawn, and the slides still running.
     this.ys = null;
     this.moves = new Map();
+    // Sessions on their way out (model.js dropLeaving), and the terminals that had a pane.
+    this.leaving = new Map();
+    this.placed = new Set();
     // A transition runs from what one render shows to what the next one does: a change is drawn
     // at its start, and this redraws it a frame later at its end.
     cx.spawn(async cx => {
@@ -112,7 +115,8 @@ export default class AgentSidebar extends View {
         this.probe(() => wake());
         // A second, or less when an answer arrives.
         await Promise.race([cx.sleep(1000), new Promise(resolve => { wake = resolve; })]);
-        if (this.changed) {
+        // A session held back as leaving comes back if it is still there after LEAVE_MS.
+        if (this.changed || this.leaving.size) {
           this.changed = false;
           cx.notify();
         }
@@ -179,7 +183,9 @@ export default class AgentSidebar extends View {
   // Only after the ✕ was armed by a first click (see row()).
   close(row) {
     const action = closeAction(row);
-    if (action) run(action.name, action.args);
+    if (!action) return;
+    this.leaving.set(row.address, Date.now());
+    run(action.name, action.args);
   }
 
   // Status changes since the last render, to animate. Nothing animates on the first one.
@@ -572,7 +578,11 @@ export default class AgentSidebar extends View {
     const t = /** @type {Record<string, import("gpui-kit").Color>} */ (theme());
     const hosts = machines();
     const now = Date.now();
-    const all = holdDone(build({ agents: agents(), terminals: terminals(), panes: panes(), spaces: spaces(), machines: hosts, focused: focused(), work: this.work, now }), this.shown ?? new Map());
+    const shownPanes = panes();
+    const placed = new Set(shownPanes.filter(pane => pane.terminal).map(pane => pane.terminal));
+    const built = build({ agents: agents(), terminals: terminals(), panes: shownPanes, spaces: spaces(), machines: hosts, focused: focused(), work: this.work, now });
+    const all = holdDone(dropLeaving(built, this.leaving, this.placed, placed, now), this.shown ?? new Map());
+    this.placed = placed;
     this.notice(all, now);
     // Background work starts or ends when an agent's status changes: ask its machine again.
     const reported = new Map();

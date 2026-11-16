@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, matches, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, matches, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -256,4 +256,24 @@ test("a finished session you open stays Done until you leave it", () => {
   assert.equal(holdDone(rows(), new Map([["t3", "done"]])).find(r => r.address === "t3").status, "working");
   // Never Done before: nothing to hold.
   assert.equal(holdDone(rows(), new Map()).find(r => r.address === "t1").status, "idle");
+});
+
+test("a session whose pane closed is held out until Herdr stops listing it, or LEAVE_MS passes", () => {
+  const rows = () => build(world({ terminals: [terminal("t1"), terminal("t2"), terminal("t3")] })).concat({ address: "t1#a", inner: true, terminal: "t1" });
+  const leaving = new Map();
+  // t1 lost its pane since the last render; t3 never had one; t2 still has its pane.
+  let shown = dropLeaving(rows(), leaving, new Set(["t1", "t2"]), new Set(["t2"]), 1000);
+  assert.deepEqual(shown.map(r => r.address).sort(), ["t2", "t3"]); // t1's sub-agent goes with it
+  assert.deepEqual([...leaving], [["t1", 1000]]);
+  // Still listed, no pane, within LEAVE_MS: still out. Not marked again from an older render.
+  shown = dropLeaving(rows(), leaving, new Set(["t2"]), new Set(["t2"]), 1000 + LEAVE_MS);
+  assert.equal(shown.some(r => r.address === "t1"), false);
+  // Gone from Herdr's lists: forgotten.
+  dropLeaving(rows().filter(r => r.address !== "t1" && r.address !== "t1#a"), leaving, new Set(["t2"]), new Set(["t2"]), 1500);
+  assert.equal(leaving.size, 0);
+  // Still listed after LEAVE_MS (parked): back.
+  leaving.set("t3", 0);
+  shown = dropLeaving(rows(), leaving, new Set(), new Set(), LEAVE_MS + 1);
+  assert.ok(shown.some(r => r.address === "t3"));
+  assert.equal(leaving.size, 0);
 });
