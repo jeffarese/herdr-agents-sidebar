@@ -7,7 +7,7 @@ on this computer and on your other machines, in one list grouped by machine and 
 needs from you. Agents that finished their turn but left work running stay under Working, and
 Claude Code's sub-agents appear under the session that started them.
 
-![Herdr's sidebar, titled Sessions, with a search field and four filters: All 10, Needs you 1, Working 4, Done 1. Under "This computer · LOCAL": Needs you, "Rotate the API signing keys"; Done, "Fix the flaky checkout test"; Working, "Upgrade the build to Node 22" with a prompt mark for its background shell, "Add retries to the webhook client" with a flag for its goal, and "Migrate the billing schema" with two sub-agents indented under it, "Check the migration on a copy" and "Find every query on invoices"; Pinned, "Tidy the logging setup"; Idle, "Write the release notes"; Shells & programs, "zsh · api". Under "studio · REMOTE": Working, "Train the ranking model"; Idle, "Profile the image pipeline". Add machine is at the bottom.](preview.png)
+![Herdr's sidebar, titled Sessions, with a search field and four filters: All 10, Needs you 1, Working 4, Done 1. Under "This computer · LOCAL": Needs you, "Rotate the API signing keys"; Done, "Fix the flaky checkout test"; Working, "Upgrade the build to Node 22" with a prompt mark for its background shell, "Add retries to the webhook client" with a flag for its goal, and "Migrate the billing schema" with two sub-agents indented under it, "Check the migration on a copy" and "Find every query on invoices"; Pinned, "Tidy the logging setup"; Idle, "Write the release notes" and "zsh · api". Under "studio · REMOTE": Working, "Train the ranking model"; Idle, "Profile the image pipeline". Add machine is at the bottom.](preview.png)
 
 This is an unofficial mod. It is not affiliated with Herdr.
 
@@ -55,8 +55,46 @@ installer. Background work and sub-agents are read from Claude Code (tested with
 | See only what needs you, works or is done | Click a filter. Click it again for All. |
 | Keep a session near the top | Hover its row and click the pin. A pinned session that has nothing to report sits under Pinned, above the idle ones, and comes first in its section otherwise. |
 | Fold a machine or a section | Click its heading. A folded machine still shows how many sessions need you, work or are done. |
-| Start a shell or an agent on a machine | Click the machine's **+**. |
+| Start a shell or an agent on a machine | Click the machine's **+**, pick a folder, then the shell or agent (below). |
+| Start another session where one works | Hover its row and click its **+**: the launcher opens with that folder picked. |
+| Close a session | Hover its row and click **✕**: its pane closes, as ⌘W does in it. One that is working, needs you, has background work or runs a program asks first. |
 | See everything about a session | Hover it: program, project, machine, status and for how long, its background work, its address and folder. |
+
+### Starting a session in a folder
+
+A machine's **+** opens a launcher: a folder at the top, what to start below.
+
+- **Folders** come first from what is open on that machine: the folder of the terminal you are
+  in, then every space's terminals and start folders. Then the folders you started sessions in
+  recently, your home folder, and your projects: each folder one level inside `~/workspace`,
+  `~/code`, `~/src`, `~/projects`, `~/dev`, `~/Developer`, `~/git`, `~/repos`, `~/work` or
+  `~/github`, and each Git repository one level inside those. Type to search them.
+- **A path** that starts with `/` or `~` lists the folders inside it, on that machine. Typing `/`
+  after a search or after part of a name goes into the folder chosen: `herd/` becomes
+  `~/workspace/herdr/`, listing what is inside. On this computer, the folder button (or ⌘O) opens
+  the system's folder picker.
+- **Where it opens:** a folder with a terminal of one of the machine's spaces in it gets a new
+  tab in that space; any other gets a new space of its own. The switch beside "Start in" changes
+  that, and stays as you set it while you move between folders.
+- **What starts:** the highlighted program, marked ↵: at first the one you started last on that
+  machine. Click any program to start it.
+
+All of it works from the keyboard, without leaving the search field:
+
+| Key | Does |
+| --- | --- |
+| Type | Search folders, or type a path |
+| ↑ ↓ | Choose the folder |
+| `/` | Go into the folder chosen |
+| ⇥ / ⇧⇥ | Choose the program |
+| ↵ | Start it (a double click on a folder does too) |
+| ⌥1 … ⌥9 | Start the program in that place at once (⌥1 is Shell) |
+| ⌘O | Choose a folder in the system's picker (this computer) |
+| Esc | Close |
+
+To open it from the keyboard, bind a key to `agent-sidebar.new` in `keys.json`, for example
+`"cmd-t": "agent-sidebar.new"` under `global`: it opens for the machine you are working on. It
+reaches the sidebar only while a layout shows it.
 
 Herdr's commands for the next and previous agent follow the order of the list. Folds are kept
 per copy of the sidebar. When the sidebar is narrower than 210 px it becomes a rail of icons,
@@ -73,8 +111,10 @@ Each machine lists its sessions in the sections Herdr's Agents list uses, most u
 | Working | Turning ring | Working on a turn |
 | Working | Pulsing prompt, robot or flag | Its turn is over, but something it started still runs (below) |
 | Pinned | Small ring | A pinned session with nothing to report |
-| Idle | Small ring | Waiting for you to say something |
-| Shells & programs | Nothing | A shell or a program that reports no status |
+| Idle | Nothing | Waiting for you to say something, or a shell or program with no status |
+
+Shells and programs follow the same rules as agents, and within a section everything is ordered
+by what changed last.
 
 Rows show how long a session has been in its state: `<1m`, `4m`, `2h`, `3d`. A session started
 by another one sits under it, and lifts it into its own most urgent section, except that a
@@ -117,6 +157,12 @@ The script changes nothing. What it prints, including the command lines of the p
 your agents, goes only to the Herdr app, over Herdr's own connection to that machine, and stays
 in memory there. The mod makes no network requests.
 
+The launcher runs two more short `sh` scripts on the machine it starts on, the same way: one
+lists your project folders (at most once every ten minutes), the other the folders inside a path
+you type. Neither changes anything. The project folders it found, the folders you started
+sessions in and the agents each machine has are kept in Herdr's shared state (`shared.json`), so
+the next launcher shows them at once.
+
 This relies on how Claude Code 2.1 lays out these files, which isn't a documented interface. If
 a later version changes them, the sidebar falls back to Herdr's status and shows no sub-agents,
 until it is updated. Other agents keep Herdr's status.
@@ -156,7 +202,9 @@ npm run bench                      # the benchmarks above
 - **`mods/agent-sidebar/background.js`** holds the probe script and reads what it prints. Also
   plain JavaScript.
 - **`mods/agent-sidebar/main.js`** draws the sidebar with Herdr's `herdr` and `gpui-kit` modules,
-  and `launcher.js` the menu behind each machine's **+**.
+  and `launcher.js` the launcher behind each machine's **+**.
+- **`mods/agent-sidebar/folders.js`** picks the folders the launcher offers and where a session
+  there opens, and holds its two `sh` scripts. Plain JavaScript too.
 - **`scripts/install.py`** installs, updates and removes it; `install.sh` fetches the repository
   when run on its own.
 

@@ -1,9 +1,9 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, openAction, duration, backgroundLines, machineOf } from "./model.js";
+import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
+import { build, groups, counts, WORDS, BACKGROUND, openAction, closeAction, duration, backgroundLines, machineOf } from "./model.js";
 import { PROBE, PROBE_MS, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
-import { initLauncher, renderLauncher } from "./launcher.js";
+import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
 const ART = "mods/agent-sidebar/";
 const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
@@ -14,6 +14,10 @@ const FILTERS = [["all", "All"], ["blocked", "Needs you"], ["working", "Working"
 const EMPTY = { blocked: "Nothing needs you", working: "Nothing is working", done: "Nothing finished yet" };
 // The mark of an agent whose turn ended but whose work goes on, by its first reason.
 const HOLD = { shell: "terminal", agents: "agent", goal: "goal" };
+// The ✕ stays armed this long after its first click; a second click sooner than a double
+// click's is ignored.
+const ARMED_MS = 4000;
+const DOUBLE_CLICK_MS = 400;
 // A machine is asked at most this often, however often its agents change status.
 const PROBE_GAP_MS = 1000;
 // Per-copy conveniences only (folded hosts and sections). Storage can be missing or throw.
@@ -45,9 +49,14 @@ export default class AgentSidebar extends View {
       cx.notify();
     });
     this.input.on("submit", () => this.open(this.visible.find(r => r.address === this.selected) ?? this.visible[0]));
+    // "focus" from pane.go; "new" (bind a key to agent-sidebar.new) opens the launcher for the
+    // focused machine; "browse" comes from the launcher, which closes for the system's picker.
     cx.spawn(async cx => {
       for (;;) {
-        if (await nextCommand() === "focus") this.input.focus();
+        const command = await nextCommand();
+        if (command === "focus") this.input.focus();
+        else if (command === "new") this.launch(spaces().find(space => space.id === focused()?.space)?.machine ?? null, {}, "dialog");
+        else if (command === "browse") this.browse();
         cx.notify();
       }
     });
@@ -113,8 +122,27 @@ export default class AgentSidebar extends View {
     if (signature(this.work) !== before) this.changed = true;
   }
 
+  // The launcher: a folder, then a shell or an agent to start there. At the pointer from a +,
+  // centered from the keyboard. `extra`: { folder, tag } to start from.
+  launch(machine, extra = {}, kind = "popup") {
+    if (!machines().some(host => (host.name ?? null) === machine && host.layout === "ready")) return;
+    openOverlay({ mod: "agent-sidebar", kind, width: LAUNCHER.width, height: LAUNCHER.height, props: { launcher: true, machine, ...extra } });
+  }
+
+  async browse() {
+    let folder = null;
+    try { folder = await pickFolder({ prompt: "Choose" }); } catch { /* no picker here */ }
+    if (folder) this.launch(null, { folder, tag: "Picked" }, "dialog");
+  }
+
   open(row) {
     const action = openAction(row);
+    if (action) run(action.name, action.args);
+  }
+
+  // Only after the ✕ was armed by a first click (see row()).
+  close(row) {
+    const action = closeAction(row);
     if (action) run(action.name, action.args);
   }
 
@@ -172,10 +200,11 @@ export default class AgentSidebar extends View {
 
   // The status mark at the end of a row. Its section header already names the status,
   // so marks stay small; shells and programs get none.
-  mark(t, row) {
+  mark(t, row, section) {
     const box = h_flex().w(14).flex_none().items_center().justify_center();
     if (!row.available) return box.tooltip("Unavailable").child(glyph("offline", 11).text_color(t.muted));
-    if (row.kind !== "agent" && row.status === "idle") return box;
+    // Under Idle the heading says it: a ring on every row reads as a column of radio buttons.
+    if (row.kind !== "agent" && row.status === "idle" || section === "idle" && row.status === "idle" && !row.background.length) return box;
     // Its turn ended, but something it started is still going: say what, quietly pulsing.
     if (row.background.length) return box.tooltip(row.background.map(reason => BACKGROUND[reason]).join(" · "))
       .child(glyph(HOLD[row.background[0]], 12).text_color(t.working).loop("opacity", { from: 0.4, to: 1, period: 1600 }));
@@ -232,6 +261,36 @@ export default class AgentSidebar extends View {
         cx.notify();
       })
       .child(glyph(row.pinned ? "pin-off" : "pin", 12));
+    // Another session where this one works: the launcher, with its folder picked.
+    const here = div().id(`here-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
+      .role("button").accessibility_label(`New session in ${row.cwd}`)
+      .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("New shell or agent in this folder")
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.launch(row.machine, { folder: row.cwd, tag: "This session" });
+        this.hovered = null;
+        cx.notify();
+      })
+      .child(glyph("plus", 13));
+    // Closing takes two deliberate clicks: the first turns ✕ into a red Close, the second closes.
+    // A stray click, or a double click, on a row's right end never ends a session.
+    const armed = this.armed?.address === row.address && Date.now() - this.armed.at < ARMED_MS;
+    const close = div().id(`close-${row.address}`).h(18).flex_none().rounded(4).flex().items_center().justify_center()
+      .role("button").accessibility_label(armed ? `Click again to close ${row.title}` : `Close ${row.title}`)
+      .cursor_pointer().tooltip(armed ? "Click again to close" : "Close")
+      .when(armed, el => el.px(6).bg(t.blocked + "26").text_color(t.blocked).text_size(10.5).font_medium().child("Close"))
+      .when(!armed, el => el.w(18).text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).child(glyph("x", 12)))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        if (!armed) this.armed = { address: row.address, at: Date.now() };
+        else if (Date.now() - this.armed.at > DOUBLE_CLICK_MS) {
+          this.armed = null;
+          this.hovered = null;
+          this.close(row);
+        }
+        cx.notify();
+      });
     const age = row.kind === "agent" && row.since && row.available ? duration(now - row.since) : "";
     // An open /goal, unless the mark already says so.
     const goal = Boolean(row.goal) && row.background[0] !== "goal" && !pinning;
@@ -245,6 +304,7 @@ export default class AgentSidebar extends View {
       .on_hover((inside, cx) => {
         if (inside) this.hovered = row.address;
         else if (this.hovered === row.address) this.hovered = null;
+        if (!inside && this.armed?.address === row.address) this.armed = null;
         cx.notify();
       })
       .tooltip(tip).on_click(() => this.open(row))
@@ -258,9 +318,11 @@ export default class AgentSidebar extends View {
       .when(row.pinned && section !== "pinned" && !pinning, el => el.child(glyph("pin", 11).text_color(t.dim)))
       .when(goal, el => el.child(div().id(`goal-${row.address}`).flex_none().tooltip(`Goal: ${row.goal.condition}`)
         .child(glyph("goal", 11).text_color(t.dim))))
-      .when(pinning, el => el.child(pin))
+      .when(pinning && !armed && Boolean(row.cwd), el => el.child(here))
+      .when(pinning && !armed, el => el.child(pin))
+      .when(pinning, el => el.child(close))
       .when(!pinning && Boolean(age), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(age)))
-      .child(this.mark(t, row));
+      .child(this.mark(t, row, section));
   }
 
   railRow(t, row) {
@@ -315,9 +377,7 @@ export default class AgentSidebar extends View {
       .when(!state, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)))
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        if (machines().some(host => (host.name ?? null) === (group.name ?? null) && host.layout === "ready")) {
-          openOverlay({ mod: "agent-sidebar", kind: "popup", width: 270, height: 400, props: { launcher: true, machine: group.name ?? null } });
-        }
+        this.launch(group.name ?? null);
       }).child(glyph("plus", 14));
     const label = `${group.remote ? "Remote" : "Local"} host ${group.label}, ${counts(group.rows).all} sessions${state ? `, ${state}` : ""}, ${open ? "expanded" : "collapsed"}`;
     const root = h_flex().id(`host-${group.key}`).flex_none().items_center()
@@ -402,8 +462,10 @@ export default class AgentSidebar extends View {
       }
       for (const section of group.sections) {
         children.push(this.section(t, group, section));
-        if (!this.isOpen(`${group.key}:${section.id}`)) continue;
-        for (const entry of section.entries) add(entry.row, this.row(t, entry, section.id, now));
+        // A folded section still shows the session you are in: clicking a session that is done
+        // makes it idle, and it must not vanish into a folded Idle.
+        const open = this.isOpen(`${group.key}:${section.id}`);
+        for (const entry of section.entries) if (open || entry.row.focused) add(entry.row, this.row(t, entry, section.id, now));
       }
       if (!group.rows.length) children.push(div().pl(29).pr(12).pt(2).pb(6).text_size(11).text_color(t.muted)
         .child(group.layout === "ready" ? "No sessions yet · use + to start one" : group.layout === "loading" ? "Loading sessions…" : "Sessions appear when this host reconnects"));

@@ -1,48 +1,302 @@
+// The window behind each machine's +: choose a folder, then a shell or an agent to start there.
 import { div, svg, image } from "gpui-kit";
-import { h_flex, v_flex } from "gpui-base";
-import { theme, knownAgents, machines, spaces, focused, run, closeOverlay, props } from "herdr";
+import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
+import { theme, knownAgents, machines, spaces, panes, focused, run, exec, home, closeOverlay, props, shared, setShared } from "herdr";
 import { newSessionAction } from "./model.js";
+import {
+  RECENT_KEY, LAST_KEY, SCAN_KEY, AGENTS_KEY, SCAN_MS, SCAN, LIST, GROUPS, machineKey, basename, tilde,
+  parseScan, parseList, pathQuery, knownFolders, searchFolders, insideFolders, remember, placement,
+} from "./folders.js";
+
+export const LAUNCHER = { width: 380, height: 520 };
+const ART = "mods/agent-sidebar/";
+const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
+const ROW = 30;
+// Programs shown before the list scrolls.
+const PROGRAMS_SHOWN = 6;
 
 export function initLauncher(view, initial, cx) {
   view.machine = initial.machine ?? null;
-  view.choices = [];
-  view.loading = true;
+  view.key = machineKey(view.machine);
+  view.chosen = initial.folder ? { path: initial.folder, tag: initial.tag ?? "Picked" } : null;
+  view.query = "";
+  view.index = 0;
+  // "tab" or "space" once the person picks one, kept across folders; null follows the folder.
+  view.where = null;
+  // The program Enter starts: "shell" or a program key once ⇥ moves it; null: the last started.
+  view.program = null;
+  view.listing = null; // LIST's answer for the folder a typed path names
+  view.listed = null; // which folder that is
+  view.scanned = shared(SCAN_KEY)?.[view.key] ?? null;
+  view.home = view.machine == null ? home() : view.scanned?.home ?? null;
+  // The last answer shows at once; a fresh one replaces it.
+  view.choices = (shared(AGENTS_KEY)?.[view.key] ?? []).filter(agent => agent.installed);
+  view.loading = !view.choices.length;
   view.handle = cx.focus_handle();
-  view.handle.focus();
+  view.scroll = ScrollHandle.new();
+  view.input = InputState.new({ placeholder: "Search folders or type a path…" });
+  view.input.on("change", (_e, cx) => typed(view, view.input.value(), cx));
+  view.input.on("submit", () => start(view, highlighted(view)));
+  view.input.focus();
+  // A popup can take the keyboard after its first frame.
+  cx.timer?.after?.(300, () => view.input.focus());
   cx.spawn(async cx => {
-    try { view.choices = (await knownAgents({ on: view.machine })).filter(agent => agent.installed); }
-    catch { view.failed = true; }
+    try {
+      const all = await knownAgents({ on: view.machine });
+      view.choices = all.filter(agent => agent.installed);
+      setShared(AGENTS_KEY, { ...shared(AGENTS_KEY), [view.key]: all });
+    } catch { view.failed = true; }
     view.loading = false;
     cx.notify();
   });
+  if (!view.scanned || Date.now() - view.scanned.at > SCAN_MS) cx.spawn(async cx => {
+    try {
+      const result = await exec("sh", ["-c", SCAN], { on: view.machine, timeout: 8000 });
+      if (result.code !== 0) return;
+      const found = parseScan(result.stdout);
+      view.scanned = { ...found, at: Date.now() };
+      view.home ??= found.home;
+      setShared(SCAN_KEY, { ...shared(SCAN_KEY), [view.key]: view.scanned });
+      cx.notify();
+    } catch { /* The open and recent folders are still offered. */ }
+  });
+}
+
+function typed(view, value, cx) {
+  const before = view.query;
+  if (value === before) return;
+  // "/" after a search, or after part of a name in a path, goes into the folder chosen:
+  // "herd/" → "~/workspace/herdr/", "~/src/ap/" → "~/src/api/".
+  if (value === `${before}/` && before.trim()) {
+    const { folder } = current(view);
+    if (folder && (!pathQuery(before) || folder.tag !== "This folder")) {
+      value = `${tilde(folder.path, view.home)}/`.replace(/^\/\/$/, "/");
+      // Set first: if set_value reports a change too, it finds nothing new.
+      view.query = value;
+      view.input.set_value(value);
+    }
+  }
+  view.query = value;
+  view.index = 0;
+  view.scroll.scroll_to_item(0);
+  const path = pathQuery(value);
+  if (path && path.dir !== view.listed) {
+    const dir = path.dir;
+    view.listed = dir;
+    view.listing = null;
+    cx.spawn(async cx => {
+      let listing;
+      try {
+        const result = await exec("sh", ["-c", LIST, "sh", dir], { on: view.machine, timeout: 6000 });
+        listing = result.code === 0 ? parseList(result.stdout) : { missing: true };
+      } catch { listing = { missing: true }; }
+      // The person may have typed on into another folder meanwhile.
+      if (view.listed !== dir) return;
+      view.listing = listing;
+      view.home ??= listing.home ?? null;
+      cx.notify();
+    });
+  }
+  cx.notify();
+}
+
+// The folders on show, and the one picked with where a session there would open.
+function current(view) {
+  const path = pathQuery(view.query);
+  const folders = path
+    ? (view.listing?.missing ? [] : insideFolders(view.listing, path.leaf))
+    : searchFolders(knownFolders({
+      machine: view.machine, chosen: view.chosen, focused: focused(), spaces: spaces(), panes: panes(),
+      recent: shared(RECENT_KEY)?.[view.key] ?? [], scanned: view.scanned?.folders ?? [], home: view.home,
+    }), view.query, view.home);
+  const index = Math.min(view.index, Math.max(0, folders.length - 1));
+  const folder = folders[index] ?? null;
+  const { match, fallback } = placement(folder?.path, view.machine, spaces(), panes(), focused());
+  const tabSpace = match ?? fallback;
+  const where = !tabSpace ? "space" : view.where ?? (match ? "tab" : "space");
+  return { path, folders, index, folder, tabSpace, where };
+}
+
+// What Enter starts: the program last started on this machine, else a shell.
+function preferred(view) {
+  const last = shared(LAST_KEY)?.[view.key];
+  return last && last !== "shell" ? view.choices.find(agent => agent.key === last) ?? null : null;
+}
+
+// The program ⇥ moved to, else the preferred one. Null is a shell.
+function highlighted(view) {
+  if (view.program === "shell") return null;
+  return view.choices.find(agent => agent.key === view.program) ?? preferred(view);
+}
+
+function cycle(view, by) {
+  const programs = [null, ...view.choices];
+  const at = programs.indexOf(highlighted(view));
+  const next = programs[(Math.max(0, at) + by + programs.length) % programs.length];
+  view.program = next?.key ?? "shell";
+}
+
+function start(view, program) {
+  const { folder, where, tabSpace } = current(view);
+  if (!folder) return;
+  const action = newSessionAction(view.machine, machines(), spaces(), focused(), program,
+    { folder: folder.path === "~" ? null : folder.path, space: where === "tab" ? tabSpace.id : null });
+  if (!action) return;
+  if (folder.path !== "~") setShared(RECENT_KEY, { ...shared(RECENT_KEY), [view.key]: remember(shared(RECENT_KEY)?.[view.key], folder.path) });
+  setShared(LAST_KEY, { ...shared(LAST_KEY), [view.key]: program?.key ?? "shell" });
+  closeOverlay(props().overlay);
+  run(action.name, action.args);
+}
+
+// The system's picker belongs to this computer and outlives a popup: the sidebar opens it,
+// then this launcher again with the folder picked.
+function browse() {
+  closeOverlay(props().overlay);
+  run("agent-sidebar.browse");
+}
+
+function move(view, by, count) {
+  if (!count) return;
+  view.index = (Math.min(view.index, count - 1) + by + count) % count;
+  view.scroll.scroll_to_item(view.positions?.get(view.index) ?? view.index);
+}
+
+function onKey(view, e, cx) {
+  const { folders } = current(view);
+  const programs = [null, ...view.choices];
+  // ⌥1–9: Herdr's own keys take ⌘ and ⌃ with digits (tabs and spaces).
+  const pick = e.modifiers?.alt && !e.modifiers.platform && !e.modifiers.control && /^[1-9]$/.exec(e.key ?? "");
+  if (e.key === "down" || e.key === "up") move(view, e.key === "down" ? 1 : -1, folders.length);
+  else if (e.key === "tab") cycle(view, e.modifiers?.shift ? -1 : 1);
+  else if (pick && Number(pick[0]) <= programs.length) start(view, programs[Number(pick[0]) - 1]);
+  else if (e.keystroke === "cmd-o" && view.machine == null) browse();
+  else return;
+  cx.stop_propagation();
+  cx.notify();
 }
 
 export function renderLauncher(view) {
   const t = theme();
-  const available = machines().some(host => host.name === view.machine && host.layout === "ready");
-  const start = program => {
-    const action = newSessionAction(view.machine, machines(), spaces(), focused(), program);
-    if (!action) return;
-    closeOverlay(props().overlay);
-    run(action.name, action.args);
+  const available = machines().some(host => (host.name ?? null) === view.machine && host.layout === "ready");
+  const { path, folders, index, folder, tabSpace, where } = current(view);
+  const remote = view.machine != null;
+  const programs = [null, ...view.choices];
+  const usual = highlighted(view)?.key ?? null;
+  const can = available && Boolean(folder);
+
+  // Folders, under a heading per group while nothing is typed.
+  const list = [];
+  view.positions = new Map();
+  const heading = text => list.push(div().h(24).flex_none().px(8).pt(6).text_size(10.5).font_medium().text_color(t.dim).child(text));
+  let group = null;
+  folders.forEach((entry, i) => {
+    const label = path ? `${GROUPS.inside} ${tilde(view.listing?.dir ?? path.dir, view.home)}` : view.query.trim() ? null : GROUPS[entry.group];
+    if (label && label !== group) heading(label);
+    group = label;
+    view.positions.set(i, list.length);
+    list.push(folderRow(view, t, entry, i, i === index));
+  });
+  if (!folders.length) {
+    const why = path ? (view.listing?.missing ? `No folder ${path.dir} on ${view.machine ?? "this computer"}` : view.listing ? "No folder starts with that" : "Looking…")
+      : "No folder matches. Type a path that starts with / or ~";
+    list.push(div().px(8).py(10).text_size(11.5).text_color(t.muted).child(why));
+  }
+
+  const programRow = (program, i) => {
+    const id = program ? `launch-${program.key}` : "launch-shell";
+    const name = program ? program.name : "Shell";
+    const icon = !program ? svg("icons/shell.svg").size(15).flex_none().text_color(t.muted)
+      : !program.icon ? glyph("agent", 15).text_color(t.muted)
+        : program.tint ? svg(program.icon).size(15).flex_none().text_color(t.foreground) : image(program.icon).size(15).flex_none();
+    const on = (program?.key ?? null) === usual;
+    const hint = on ? "↵" : i < 9 ? `⌥${i + 1}` : "";
+    return h_flex().id(id).h(ROW).flex_none().px(8).gap(9).rounded(6).items_center()
+      .role("button").aria_selected(on).accessibility_label(`Start ${name} in ${folder ? tilde(folder.path, view.home) : "no folder"} on ${view.machine ?? "this computer"}`)
+      .text_color(can ? t.foreground : t.muted)
+      .when(on, el => el.bg(t.selected))
+      .when(can && !on, el => el.hover(s => s.bg(t.hover)))
+      .when(can, el => el.cursor_pointer())
+      .on_click(() => start(view, program))
+      .child(icon).child(div().flex_1().min_w(0).truncate().child(name))
+      .when(Boolean(hint), el => el.child(div().flex_none().px(5).h(18).rounded(4).flex().items_center()
+        .text_size(10).text_color(t.dim).when(hint === "↵", k => k.bg(t.raised).text_color(t.muted)).child(hint)));
   };
-  const row = (id, icon, label, action) => h_flex().id(id).h(32).flex_none().px(9).gap(9).rounded(6).items_center()
-    .role("button").accessibility_label(`${label} on ${view.machine ?? "this computer"}`)
-    .text_color(available ? t.foreground : t.muted)
-    .when(available, el => el.cursor_pointer().hover(s => s.bg(t.hover)))
-    .on_click(action).child(icon).child(label);
-  // A scroll container needs a definite parent height or its agent rows collapse to zero.
-  const height = Math.min(400, 124 + Math.max(1, view.choices.length) * 32);
-  return v_flex().id("session-launcher").w_full().h(height).min_h(0).p(6).gap(3).bg(t.popover).text_size(12.5).track_focus(view.handle)
-    .child(h_flex().px(9).h(30).gap(8).items_center()
-      .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(view.machine ?? "This computer"))
-      .child(div().text_size(9).text_color(t.muted).child(view.machine == null ? "LOCAL" : "REMOTE")))
-    .child(row("launch-shell", svg("icons/shell.svg").size(15), "New shell", () => start(null)))
-    .child(div().h(1).mx(9).my(4).bg(t.border))
-    .child(div().px(9).py(3).text_size(10.5).text_color(t.muted).child("Start an agent"))
-    .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar().children(view.choices.map(program => row(
-      `launch-${program.key}`, program.icon ? (program.tint ? svg(program.icon).size(15) : image(program.icon).size(15))
-        : svg("mods/agent-sidebar/agent.svg").size(15), program.name, () => start(program)))))
-    .when(!available || view.loading || view.failed || !view.choices.length, el => el.child(div().px(9).py(8).text_size(11).text_color(t.muted)
-      .child(!available ? "Host unavailable" : view.loading ? "Checking installed agents…" : view.failed ? "Could not check agents. Shell is still available." : "No agents installed on this host")));
+  const notice = !available ? "Host unavailable" : view.loading ? "Checking installed agents…"
+    : view.failed ? "Could not check agents. A shell still starts." : !view.choices.length ? "No agents installed on this host" : "";
+  const shown = Math.min(programs.length, PROGRAMS_SHOWN);
+
+  return v_flex().id("session-launcher").w_full().h(LAUNCHER.height).min_h(0).p(8).gap(6).bg(t.popover).text_size(12.5)
+    .track_focus(view.handle).on_key_down((e, cx) => onKey(view, e, cx))
+    .child(h_flex().h(26).px(4).gap(8).items_center()
+      .child(glyph(remote ? "server" : "computer", 15).text_color(remote ? t.ansi4 : t.accent))
+      .child(div().min_w(0).truncate().font_semibold().text_color(t.foreground).child(view.machine ?? "This computer"))
+      .child(div().flex_none().px(4).py(1).rounded(4).bg(t.raised).text_size(8.5).font_semibold()
+        .text_color(remote ? t.ansi4 : t.accent).child(remote ? "REMOTE" : "LOCAL"))
+      .child(div().flex_1())
+      .child(div().text_size(10.5).text_color(t.dim).child("New session")))
+    .child(searchBox(view, t))
+    .child(v_flex().id("launcher-folders").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(view.scroll)
+      .role("list_box").accessibility_label("Folders").children(list))
+    .child(div().h(1).flex_none().bg(t.border))
+    .child(h_flex().h(26).flex_none().px(4).gap(6).items_center()
+      .child(div().flex_none().text_size(11).text_color(t.muted).child("Start in"))
+      .child(div().min_w(0).truncate().font_medium().text_color(folder ? t.foreground : t.dim)
+        .child(folder ? basename(tilde(folder.path, view.home)) : "no folder"))
+      .child(div().flex_1())
+      .child(whereControl(view, t, tabSpace, where)))
+    .child(v_flex().id("launcher-programs").h(shown * ROW).flex_none().min_h(0).overflow_y_scrollbar()
+      .children(programs.map(programRow)))
+    .when(Boolean(notice), el => el.child(div().px(8).text_size(11).text_color(t.muted).child(notice)))
+    .child(h_flex().h(18).flex_none().px(4).gap(10).items_center().text_size(10).text_color(t.dim)
+      .child("↑↓ folder").child("⇥ program").child("/ open folder").child("↵ start"));
+}
+
+function folderRow(view, t, entry, i, on) {
+  const shown = tilde(entry.path, view.home);
+  const name = shown === "~" ? "Home" : basename(shown);
+  const parent = shown === "~" || shown === "/" ? shown : shown.slice(0, Math.max(1, shown.length - basename(shown).length - 1));
+  return h_flex().id(`folder-${i}`).h(ROW).flex_none().min_w(0).px(8).gap(8).rounded(6).items_center()
+    .role("list_box_option").aria_selected(on).accessibility_label(`${shown}${entry.tag ? `, ${entry.tag}` : ""}`)
+    .cursor_pointer().tooltip(shown)
+    .when(on, el => el.bg(t.selected)).when(!on, el => el.hover(s => s.bg(t.hover)))
+    .on_click((e, cx) => {
+      view.index = i;
+      // A double click starts what Enter would.
+      if (e?.click_count >= 2) start(view, highlighted(view));
+      cx?.notify();
+    })
+    .child(glyph(entry.tag === "This folder" ? "folder-open" : "folder", 14).text_color(on ? t.foreground : t.muted))
+    .child(div().flex_none().max_w(170).truncate().text_color(t.foreground).when(on, el => el.font_medium()).child(name))
+    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(name === shown ? "" : parent))
+    .when(Boolean(entry.tag), el => el.child(div().flex_none().max_w(110).truncate().text_size(10).text_color(t.dim).child(entry.tag)));
+}
+
+function searchBox(view, t) {
+  const button = (id, icon, tip, action) => div().id(id).size(22).flex_none().rounded(4).flex().items_center().justify_center()
+    .role("button").accessibility_label(tip).tooltip(tip)
+    .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+    .on_click((_e, cx) => { cx?.stop_propagation(); action(cx); }).child(glyph(icon, 13));
+  return h_flex().h(32).flex_none().pl(9).pr(4).gap(7).rounded(7).bg(t.background).border(1).border_color(t.border).items_center()
+    .child(glyph("search", 13).text_color(t.muted))
+    .child(Input.new(view.input).accessibility_label("Search folders or type a path").flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground))
+    .when(Boolean(view.query), el => el.child(button("launcher-clear", "x", "Clear", cx => {
+      view.input.set_value("");
+      typed(view, "", cx);
+    })))
+    .when(view.machine == null, el => el.child(button("launcher-browse", "folder-open", "Choose a folder… (⌘O)", () => browse())));
+}
+
+// A tab in a space there, or a space of its own. Without a space there, only a space.
+function whereControl(view, t, tabSpace, where) {
+  if (!tabSpace) return div().text_size(10.5).text_color(t.dim).child("New space");
+  const chip = (id, label, tip, value) => div().id(id).h(20).px(7).max_w(150).rounded(4).flex().items_center()
+    .role("button").aria_selected(where === value).accessibility_label(tip).tooltip(tip)
+    .cursor_pointer().text_size(10.5).truncate()
+    .text_color(where === value ? t.foreground : t.muted)
+    .when(where === value, el => el.bg(t.selected)).when(where !== value, el => el.hover(s => s.bg(t.hover)))
+    .on_click((_e, cx) => { view.where = value; cx?.notify(); })
+    .child(label);
+  return h_flex().flex_none().p(2).gap(2).rounded(6).bg(t.background).border(1).border_color(t.border)
+    .child(chip("where-tab", `Tab in ${tabSpace.name}`, `A new tab in the space ${tabSpace.name}`, "tab"))
+    .child(chip("where-space", "New space", "A new space of its own", "space"));
 }

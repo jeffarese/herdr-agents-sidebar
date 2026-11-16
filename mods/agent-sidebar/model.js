@@ -7,7 +7,8 @@ export const machineOf = address => address?.includes("/") ? address.slice(0, ad
 const statusOf = status => status === "error" ? "blocked" : Object.hasOwn(WORDS, status) ? status : "unknown";
 const clean = text => (text ?? "").replace(/^[^\p{L}\p{N}~/]+/u, "").trim();
 const basename = path => path?.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
-const priority = row => PRIORITY[row.status] ?? (row.pinned ? 30 : row.kind === "agent" ? 20 : row.kind === "process" ? 10 : 0);
+// Shells and programs sort with agents: by status, then pins, then what changed last.
+const priority = row => PRIORITY[row.status] ?? (row.pinned ? 30 : 20);
 function taskTitle(value, program, address) {
   const title = clean(value);
   if (!title || /^[~/]|^[A-Za-z]:[\\/]/.test(title) || /^\d+$/.test(title)) return "";
@@ -170,13 +171,13 @@ export function matches(row, query, filter = "all") {
 
 // Sections inside each host, in the order of Herdr's own Agents panel (by priority).
 // Pins break ties inside the status sections; a pinned idle session gets its own section.
+// Shells and programs follow the same rules: with nothing to report, they are idle.
 export const SECTIONS = [
   { id: "blocked", label: "Needs you", status: "blocked" },
   { id: "done", label: "Done", status: "done" },
   { id: "working", label: "Working", status: "working" },
   { id: "pinned", label: "Pinned", status: null },
   { id: "idle", label: "Idle", status: null },
-  { id: "terminals", label: "Shells & programs", status: null },
 ];
 const URGENT = { blocked: 3, done: 2, working: 1 };
 // A sub-agent reports to its parent: its "done" is the parent's news, not the user's.
@@ -184,8 +185,7 @@ const urgency = (row, nested) => URGENT[nested && row.status === "done" ? "idle"
 
 export function sectionOf(row, status = row.status) {
   if (URGENT[status]) return status;
-  if (row.pinned) return "pinned";
-  return row.kind === "agent" ? "idle" : "terminals";
+  return row.pinned ? "pinned" : "idle";
 }
 
 // Rows of one host as sections of {row, depth} entries. Sub-agents sit under their parent
@@ -261,12 +261,23 @@ export function openAction(row) {
     : { name: "terminal.peek", args: { terminal: row.terminal ?? row.address } };
 }
 
+// Closing a session: its pane (as ⌘W does), or its terminal when it has none. A sub-agent
+// inside a session can't be closed by itself.
+export function closeAction(row) {
+  if (!row?.available || row.inner) return null;
+  return row.pane ? { name: "pane.close", args: { pane: row.pane } } : { name: "terminal.kill", args: { terminal: row.address } };
+}
+
 // Never use the active host implicitly: a local + must stay local while a remote tab is focused.
-export function newSessionAction(machine, machines, spaces, focused, program = null) {
+// `folder`: where it starts (omitted: where the space's focused pane is, or the machine's home).
+// `space`: the space it joins as a tab, null for a new space; omitted, the focused space on
+// that machine, else its active or first one.
+export function newSessionAction(machine, machines, spaces, focused, program = null, { folder, space: target } = {}) {
   if (!machines.some(host => (host.name ?? null) === machine && host.layout === "ready")) return null;
   const candidates = spaces.filter(space => (space.machine ?? null) === machine);
-  const space = candidates.find(space => space.id === focused?.space) ?? candidates.find(space => space.active) ?? candidates[0];
-  const args = program ? { name: program.name, argv: program.run } : {};
+  const space = target !== undefined ? candidates.find(space => space.id === target)
+    : candidates.find(space => space.id === focused?.space) ?? candidates.find(space => space.active) ?? candidates[0];
+  const args = { ...(program ? { name: program.name, argv: program.run } : {}), ...(folder ? { folder } : {}) };
   return space ? { name: "tab.new", args: { ...args, space: space.id } }
     : { name: "space.new", args: { ...args, machine: machine ?? "" } };
 }

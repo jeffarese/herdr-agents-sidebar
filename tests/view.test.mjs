@@ -4,17 +4,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as model from "../mods/agent-sidebar/model.js";
 import * as background from "../mods/agent-sidebar/background.js";
+import * as folders from "../mods/agent-sidebar/folders.js";
 
 function setup(initial = {}, saved = {}) {
   const commands = [];
   const overlays = [];
   const execs = [];
   let execResult = async () => ({ code: 0, stdout: "", stderr: "" });
+  let agentList = [];
+  let picked = null;
   let order;
   let scrollTo;
   const state = {
     machines: [{ name: null, layout: "ready" }, { name: "work", layout: "ready" }],
-    agents: [], spaces: [], panes: [],
+    agents: [], spaces: [], panes: [], focused: { terminal: "t1" },
     terminals: [
       { address: "t1", state: "live", status: "idle", title: "Local task", program: { name: "Claude", agent: true } },
       { address: "work/t1", state: "live", status: "blocked", title: "Remote task", program: { name: "Claude", agent: true } },
@@ -38,7 +41,10 @@ function setup(initial = {}, saved = {}) {
   const input = { handlers: {}, text: "", on(event, callback) { this.handlers[event] = callback; }, value() { return this.text; }, set_value(v) { this.text = v; }, focus() {} };
   const timers = [];
   const sharedState = {};
-  const cx = { notify() {}, stop_propagation() {}, spawn() {}, focus_handle() { return { focus() {} }; }, timer: { every(ms) { timers.push(ms); } } };
+  // Tasks started with cx.spawn run when a launcher test awaits h.settle(). The sidebar's own
+  // never end, so its tests leave them queued.
+  const tasks = [];
+  const cx = { notify() {}, stop_propagation() {}, spawn(f) { tasks.push(f); }, focus_handle() { return { focus() {} }; }, timer: { every(ms) { timers.push(ms); } } };
   // Each view gets its own storage, as each Herdr mod copy does.
   const storage = { data: { ...saved }, getItem(k) { return this.data[k] ?? null; }, setItem(k, v) { this.data[k] = String(v); } };
   const imports = {
@@ -46,22 +52,26 @@ function setup(initial = {}, saved = {}) {
     View: class {}, div: el, svg: path => el().src(path), image: el, h_flex: el, v_flex: el,
     InputState: { new: () => input }, Input: { new: el }, ScrollHandle: { new: () => ({ scroll_to_item(i) { scrollTo = i; } }) },
     ...Object.fromEntries(Object.keys(state).map(k => [k, () => state[k]])),
-    focused: () => ({ terminal: "t1" }), theme: () => new Proxy({}, { get: () => "#aabbcc" }), settings: () => ({ zoom: 1 }),
+    focused: () => state.focused, theme: () => new Proxy({}, { get: () => "#aabbcc" }), settings: () => ({ zoom: 1 }),
     run: (name, args) => commands.push({ name, args }), setAgentOrder: addresses => { order = addresses; }, nextCommand: () => new Promise(() => {}),
-    openOverlay: spec => overlays.push(spec), closeOverlay() {}, props: () => ({ ...initial, overlay: "popup" }), knownAgents: async () => [],
+    openOverlay: spec => overlays.push(spec), closeOverlay() {}, props: () => ({ ...initial, overlay: "popup" }), knownAgents: async () => agentList,
+    home: () => "/Users/me", pickFolder: async () => picked,
     localStorage: storage, shared: key => sharedState[key], setShared: (key, value) => { sharedState[key] = value; },
     updates: () => ({ app: { ready: null } }),
     exec: (...args) => { execs.push(args); return execResult(...args); },
-    ...model, ...background,
+    ...model, ...background, ...folders,
   };
-  const launcherSource = readFileSync(new URL("../mods/agent-sidebar/launcher.js", import.meta.url), "utf8").replace(/^import .*;$/gm, "").replace(/export function/g, "function");
-  Object.assign(imports, new Function(...Object.keys(imports), `${launcherSource}\nreturn { initLauncher, renderLauncher };`)(...Object.values(imports)));
-  const source = readFileSync(new URL("../mods/agent-sidebar/main.js", import.meta.url), "utf8").replace(/^import .*;$/gm, "").replace("export default class", "return class");
+  const launcherSource = readFileSync(new URL("../mods/agent-sidebar/launcher.js", import.meta.url), "utf8").replace(/^import [\s\S]*?;$/gm, "").replace(/export (function|const)/g, "$1");
+  Object.assign(imports, new Function(...Object.keys(imports), `${launcherSource}\nreturn { initLauncher, renderLauncher, LAUNCHER };`)(...Object.values(imports)));
+  const source = readFileSync(new URL("../mods/agent-sidebar/main.js", import.meta.url), "utf8").replace(/^import [\s\S]*?;$/gm, "").replace("export default class", "return class");
   const View = new Function(...Object.keys(imports), source)(...Object.values(imports));
   const view = new View();
   // GPUI init receives its own props; Herdr supplies overlay props through herdr.props().
   view.init({}, cx);
-  return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, answer: f => { execResult = f; }, order: () => order, scrollTo: () => scrollTo };
+  const settle = async () => { while (tasks.length) await tasks.shift()(cx); };
+  return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, settle,
+    answer: f => { execResult = f; }, agents: list => { agentList = list; }, pick: path => { picked = path; },
+    order: () => order, scrollTo: () => scrollTo };
 }
 // The svg glyphs under a node, by their file.
 const glyphs = node => !node || typeof node !== "object" ? [] : [...(node.props.src ? [node] : []), ...node.nodes.flatMap(glyphs)];
@@ -183,7 +193,7 @@ function text(node) {
 }
 const ids = node => !node || typeof node !== "object" ? [] : [node.props.id, ...node.nodes.flatMap(ids)].filter(Boolean);
 
-test("each host lists its sessions under Needs you, Done, Working, Pinned, Idle and Shells headings", () => {
+test("each host lists its sessions under Needs you, Done, Working, Pinned and Idle, shells among them", () => {
   const h = setup();
   h.state.terminals = [
     { address: "t1", state: "live", status: "idle", program: { name: "Claude", agent: true }, title: "Idle task" },
@@ -197,16 +207,17 @@ test("each host lists its sessions under Needs you, Done, Working, Pinned, Idle 
   const list = find(root, "host-agent-list").nodes.map(n => n.props.id);
   assert.deepEqual(list, [
     "host-local", "section-local:done", "agent-t3", "section-local:working", "agent-t2",
-    "section-local:pinned", "agent-t4", "section-local:idle", "agent-t1", "section-local:terminals", "agent-t5",
+    "section-local:pinned", "agent-t4", "section-local:idle", "agent-t1", "agent-t5",
     "host-remote:work", "section-remote:work:blocked", "agent-work/t1", "add-machine",
   ]);
   assert.match(text(find(root, "section-remote:work:blocked")), /Needs you 1/);
-  assert.match(text(find(root, "section-local:terminals")), /Shells & programs 1/);
+  assert.match(text(find(root, "section-local:idle")), /Idle 2/);
 });
 
 test("folding a section hides its rows from navigation and is remembered by the next copy", () => {
   const h = setup();
   h.state.terminals.push({ address: "t2", state: "live", status: "working", program: { name: "Claude", agent: true }, title: "Busy" });
+  h.state.focused = { terminal: "t2" }; // the session you are in stays in view (tested below)
   let root = h.view.render();
   find(root, "section-local:idle").props.on_click(null, h.cx);
   root = h.view.render();
@@ -215,6 +226,7 @@ test("folding a section hides its rows from navigation and is remembered by the 
   assert.deepEqual(h.order(), ["t2", "work/t1"]);
   const next = setup({}, h.storage.data);
   next.state.terminals = h.state.terminals;
+  next.state.focused = h.state.focused;
   next.view.render();
   assert.deepEqual(next.order(), ["t2", "work/t1"]);
   // Search still reveals rows inside a folded section.
@@ -451,4 +463,207 @@ test("Claude Code's own sub-agents sit under their session, open it, and count a
   h.input.text = "sub-agent";
   h.input.handlers.change(null, h.cx);
   assert.deepEqual(find(h.view.render(), "host-agent-list").nodes.map(n => n.props.id), ["host-local", "section-local:working", "agent-t1#a1"]);
+});
+
+// The launcher behind each +: a folder first, then what to start there.
+function launcherSetup(machine = null) {
+  const h = setup({ launcher: true, machine });
+  h.state.spaces = [{ id: "s1", name: "api", machine: null, folder: "/Users/me/api", active: true, tabs: [{ id: "a1" }] }];
+  h.state.panes = [{ pane: "p1", tab: "a1", terminal: "t1", cwd: "/Users/me/api/server" }];
+  h.state.focused = { space: "s1", terminal: "t1", cwd: "/Users/me/api/server" };
+  return h;
+}
+const folderPaths = root => ids(root).filter(id => /^folder-\d+$/.test(id)).map(id => find(root, id).props.tooltip);
+const claude = { key: "claude", name: "Claude Code", run: ["claude"], installed: true, icon: null };
+
+test("the launcher offers the folder in focus first and starts a shell there as a tab of its space", () => {
+  const h = launcherSetup();
+  const root = h.view.render();
+  assert.deepEqual(folderPaths(root), ["~/api/server", "~/api", "~"]);
+  assert.equal(find(root, "folder-0").props.aria_selected, true);
+  assert.equal(find(root, "where-tab").props.aria_selected, true);
+  find(root, "launch-shell").props.on_click();
+  assert.deepEqual(h.commands, [{ name: "tab.new", args: { folder: "/Users/me/api/server", space: "s1" } }]);
+  assert.deepEqual(h.sharedState["agent-sidebar.recent"], { "": ["/Users/me/api/server"] });
+  assert.deepEqual(h.sharedState["agent-sidebar.last"], { "": "shell" });
+});
+
+test("the launcher's keys choose a folder and an agent; Enter starts the one last started", async () => {
+  const h = launcherSetup();
+  h.agents([claude, { key: "codex", name: "Codex", run: ["codex"], installed: false }]);
+  await h.settle();
+  // Its projects are looked for on its machine.
+  assert.equal(h.execs[0][1][1].includes("$HOME/workspace"), true);
+  assert.equal(h.execs[0][2].on, null);
+  let root = h.view.render();
+  assert.equal(find(root, "launch-codex"), null); // not installed
+  root.props.on_key_down({ key: "down", keystroke: "down" }, h.cx);
+  root = h.view.render();
+  assert.equal(find(root, "folder-1").props.aria_selected, true);
+  // A folder with no terminal of a space in it gets a new space unless the person asks.
+  root.props.on_key_down({ key: "down", keystroke: "down" }, h.cx);
+  root = h.view.render();
+  assert.equal(find(root, "where-space").props.aria_selected, true);
+  find(root, "where-tab").props.on_click(null, h.cx);
+  root.props.on_key_down({ key: "2", keystroke: "cmd-2", modifiers: { platform: true } }, h.cx); // Herdr's: tab 2
+  assert.deepEqual(h.commands, []);
+  root.props.on_key_down({ key: "2", keystroke: "alt-2", modifiers: { alt: true } }, h.cx);
+  assert.deepEqual(h.commands, [{ name: "tab.new", args: { name: "Claude Code", argv: ["claude"], folder: "/Users/me", space: "s1" } }]);
+
+  const again = launcherSetup();
+  again.sharedState["agent-sidebar.last"] = h.sharedState["agent-sidebar.last"];
+  again.sharedState["agent-sidebar.agents"] = h.sharedState["agent-sidebar.agents"];
+  again.view.init({}, again.cx); // a new popup, opened with what the last one kept
+  root = again.view.render();
+  // The last answer about agents shows at once, and the one started last takes Enter.
+  assert.match(text(find(root, "launch-claude")), /↵/);
+  assert.deepEqual(folderPaths(root), ["~/api/server", "~/api", "~"]); // Home was recorded only as "~"
+  again.input.handlers.submit();
+  assert.deepEqual(again.commands[0], { name: "tab.new", args: { name: "Claude Code", argv: ["claude"], folder: "/Users/me/api/server", space: "s1" } });
+});
+
+test("a typed path lists the folders inside it on that machine, and / goes into the one chosen", async () => {
+  const h = launcherSetup("work");
+  h.answer(async (_cmd, args) => args[1].includes("cd \"$d\"")
+    ? { code: 0, stdout: `/home/me\n${args[3] === "~/src" ? "/home/me/src\nweb\napi\n" : "/home/me/src/api\n"}`, stderr: "" }
+    : { code: 1, stdout: "", stderr: "" });
+  const type = value => { h.input.text = value; h.input.handlers.change(null, h.cx); };
+  type("~/src/");
+  assert.match(text(h.view.render()), /Looking/);
+  await h.settle();
+  const listed = () => h.execs.filter(([, args]) => args[1].includes("cd \"$d\"")).map(([, args, opts]) => [args[3], opts.on]);
+  assert.deepEqual(listed(), [["~/src", "work"]]);
+  let root = h.view.render();
+  assert.deepEqual(folderPaths(root), ["~/src", "~/src/web", "~/src/api"]);
+  // Typing on inside the same folder filters without asking again.
+  type("~/src/a");
+  root = h.view.render();
+  assert.deepEqual(folderPaths(root), ["~/src/api"]);
+  // "/" after part of a name completes it.
+  type("~/src/a/");
+  assert.equal(h.input.text, "~/src/api/");
+  await h.settle();
+  assert.deepEqual(listed(), [["~/src", "work"], ["~/src/api", "work"]]);
+  root = h.view.render();
+  assert.deepEqual(folderPaths(root), ["~/src/api"]);
+  find(root, "launch-shell").props.on_click();
+  // No space of that machine: a new space there.
+  assert.deepEqual(h.commands, [{ name: "space.new", args: { folder: "/home/me/src/api", machine: "work" } }]);
+});
+
+test("/ after a search goes into the folder chosen; after the folder itself it is just typed", () => {
+  const h = launcherSetup();
+  const type = value => { h.input.text = value; h.input.handlers.change(null, h.cx); };
+  type("api");
+  h.view.render();
+  type("api/");
+  assert.equal(h.input.text, "~/api/"); // the exact name ranks first
+  type("~");
+  type("~/");
+  assert.equal(h.input.text, "~/");
+});
+
+test("Tab moves Enter's program through the list and back; it shows which", async () => {
+  const h = launcherSetup();
+  h.agents([claude, { key: "codex", name: "Codex", run: ["codex"], installed: true }]);
+  await h.settle();
+  const tab = shift => h.view.render().props.on_key_down({ key: "tab", keystroke: shift ? "shift-tab" : "tab", modifiers: { shift } }, h.cx);
+  let root = h.view.render();
+  assert.equal(find(root, "launch-shell").props.aria_selected, true); // nothing started yet: a shell
+  tab(false);
+  tab(false);
+  root = h.view.render();
+  assert.equal(find(root, "launch-codex").props.aria_selected, true);
+  assert.match(text(find(root, "launch-codex")), /↵/);
+  tab(false); // wraps
+  tab(true); // and back
+  h.input.handlers.submit();
+  assert.deepEqual(h.commands, [{ name: "tab.new", args: { name: "Codex", argv: ["codex"], folder: "/Users/me/api/server", space: "s1" } }]);
+});
+
+test("a typed folder that is not there says so and starts nothing", async () => {
+  const h = launcherSetup();
+  h.answer(async () => ({ code: 3, stdout: "", stderr: "" }));
+  h.input.text = "/nope/";
+  h.input.handlers.change(null, h.cx);
+  await h.settle();
+  const root = h.view.render();
+  assert.match(text(root), /No folder \/nope on this computer/);
+  find(root, "launch-shell").props.on_click();
+  assert.deepEqual(h.commands, []);
+});
+
+test("Browse closes the popup for the system's picker; the sidebar reopens the launcher with the folder", async () => {
+  const h = launcherSetup();
+  find(h.view.render(), "launcher-browse").props.on_click(null, h.cx);
+  assert.deepEqual(h.commands, [{ name: "agent-sidebar.browse", args: undefined }]);
+  assert.equal(find(launcherSetup("work").view.render(), "launcher-browse"), null); // this computer's picker only
+
+  const sidebar = setup();
+  sidebar.pick("/Users/me/picked");
+  await sidebar.view.browse();
+  assert.deepEqual(sidebar.overlays[0].props, { launcher: true, machine: null, folder: "/Users/me/picked", tag: "Picked" });
+  assert.equal(sidebar.overlays[0].kind, "dialog");
+  const picked = setup(sidebar.overlays[0].props);
+  assert.deepEqual(text(find(picked.view.render(), "folder-0")).trim().split(/\s+/), ["picked", "~", "Picked"]);
+});
+
+test("hovering a session offers a new session in its folder", () => {
+  const h = setup();
+  h.state.terminals[0].cwd = "/Users/me/api";
+  find(h.view.render(), "agent-t1").props.on_hover(true, h.cx);
+  find(h.view.render(), "here-t1").props.on_click(null, h.cx);
+  assert.deepEqual(h.overlays[0].props, { launcher: true, machine: null, folder: "/Users/me/api", tag: "This session" });
+  assert.deepEqual(h.commands, []); // the session itself is not opened
+});
+
+test("idle sessions under Idle carry no ring: the heading says it", () => {
+  const h = setup();
+  const root = h.view.render();
+  const row = find(root, "agent-t1");
+  assert.equal(row.nodes.at(-1).nodes.length, 0);
+  // Elsewhere the mark stays.
+  assert.ok(glyphs(find(root, "agent-work/t1")).length || find(root, "agent-work/t1").nodes.at(-1).nodes.length);
+});
+
+test("✕ takes two deliberate clicks: a stray or double click never closes a session", () => {
+  const h = setup();
+  h.state.panes = [{ pane: "p1", tab: "a1", terminal: "t1", cwd: "/x" }];
+  const click = id => find(h.view.render(), id).props.on_click(null, h.cx);
+  find(h.view.render(), "agent-t1").props.on_hover(true, h.cx);
+  click("close-t1");
+  assert.deepEqual(h.commands, []);
+  let root = h.view.render();
+  assert.match(text(find(root, "close-t1")), /Close/);
+  assert.equal(find(root, "pin-t1"), null); // the armed Close takes their room
+  click("close-t1"); // as fast as a double click
+  assert.deepEqual(h.commands, []);
+  h.view.armed.at -= 1000;
+  click("close-t1");
+  assert.deepEqual(h.commands, [{ name: "pane.close", args: { pane: "p1" } }]);
+  // Leaving the row disarms it; so does waiting.
+  h.state.terminals.push({ address: "t9", state: "live", status: "working", title: "Busy", program: { name: "Claude", agent: true } });
+  find(h.view.render(), "agent-t9").props.on_hover(true, h.cx);
+  click("close-t9");
+  find(h.view.render(), "agent-t9").props.on_hover(false, h.cx);
+  find(h.view.render(), "agent-t9").props.on_hover(true, h.cx);
+  click("close-t9");
+  h.view.armed.at -= 5000;
+  click("close-t9");
+  assert.equal(h.commands.length, 1);
+  assert.deepEqual(model.closeAction({ available: true, address: "t9", background: [] }), { name: "terminal.kill", args: { terminal: "t9" } });
+});
+
+test("a sub-agent inside a session, or one on a machine that is away, has no ✕", () => {
+  assert.equal(model.closeAction({ available: true, inner: true, background: [] }), null);
+  assert.equal(model.closeAction({ available: false, background: [] }), null);
+});
+
+test("the session you are in stays in view when its section is folded", () => {
+  const h = setup(); // t1 is idle and focused
+  h.state.terminals.push({ address: "t2", state: "live", status: "idle", title: "Other", program: { name: "Claude", agent: true } });
+  find(h.view.render(), "section-local:idle").props.on_click(null, h.cx);
+  const root = h.view.render();
+  assert.ok(find(root, "agent-t1"));
+  assert.equal(find(root, "agent-t2"), null);
 });

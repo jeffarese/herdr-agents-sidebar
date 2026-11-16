@@ -97,7 +97,7 @@ test("shell rows use their live folder and preserve explicit names", () => {
   assert.ok(matches(rows[0], "shell local"));
 });
 
-test("attention, done and running work lead; pins promote idle shells and other programs remain visible", () => {
+test("attention, done and running work lead; pins promote; idle shells and programs sort with agents by recency", () => {
   const shell = { shell: true, name: "zsh" };
   const rows = build(world({ terminals: [
     terminal("shell", null, { program: shell, created_ms: 300 }),
@@ -105,7 +105,7 @@ test("attention, done and running work lead; pins promote idle shells and other 
     terminal("process", null, { program: { name: "Neovim" } }),
     terminal("idle"), terminal("working", "working"), terminal("done", "done"), terminal("attention", "blocked"),
   ] }));
-  assert.deepEqual(rows.map(r => r.address), ["attention", "done", "working", "pinned-shell", "idle", "process", "shell"]);
+  assert.deepEqual(rows.map(r => r.address), ["attention", "done", "working", "pinned-shell", "shell", "idle", "process"]);
   assert.equal(rows.find(r => r.address === "process").kind, "process");
 });
 
@@ -119,7 +119,7 @@ test("new sessions always target the selected host, even while another host has 
   assert.equal(newSessionAction("offline", hosts, spaces, null), null);
 });
 
-test("sections follow Herdr's priority; a sub-agent's done does not lift its parent", () => {
+test("sections follow Herdr's priority, shells too; a sub-agent's done does not lift its parent", () => {
   const shell = { shell: true, name: "zsh" };
   const rows = build(world({ terminals: [
     terminal("parent"), terminal("kid", "done", { parent: "parent" }),
@@ -128,7 +128,7 @@ test("sections follow Herdr's priority; a sub-agent's done does not lift its par
   ] }));
   const sections = sectionize(rows.filter(r => !r.machine));
   assert.deepEqual(sections.map(s => [s.id, s.entries.map(e => `${e.row.address}:${e.depth}`)]), [
-    ["working", ["busy:0"]], ["pinned", ["kept:0"]], ["idle", ["odd:0", "parent:0", "kid:1"]], ["terminals", ["sh:0"]],
+    ["working", ["busy:0"]], ["pinned", ["kept:0"]], ["idle", ["odd:0", "parent:0", "kid:1", "sh:0"]],
   ]);
 });
 
