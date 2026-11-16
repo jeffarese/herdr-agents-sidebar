@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, matches, openAction, newSessionAction, sectionize, duration, backgroundLines } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, matches, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -216,4 +216,44 @@ test("Claude Code's sub-agents are rows inside their session, counted as part of
   assert.equal(parent.status, "working");
   assert.deepEqual(backgroundLines(parent, now).slice(-2), ["Sub-agent: Look at part 4", "+2 more"]);
   assert.deepEqual(counts(rows), { all: 1, blocked: 0, done: 0, working: 1, idle: 0, unknown: 0 });
+});
+
+test("inside a status, sessions in the same folder sit together where the first of them would be", () => {
+  const rows = build(world({ terminals: [
+    terminal("a1", "idle", { cwd: "/code/api/", status_ms: 400 }),
+    terminal("b1", "idle", { cwd: "/code/web", status_ms: 300 }),
+    terminal("a2", "idle", { cwd: "/code/api", status_ms: 200 }),
+    terminal("kid", "idle", { cwd: "/code/web", parent: "a2", status_ms: 100 }),
+    terminal("a3", "working", { cwd: "/code/api" }),
+    terminal("none", "idle", { status_ms: 50 }),
+  ] }));
+  const idle = sectionize(rows.filter(r => !r.machine)).find(s => s.id === "idle");
+  // A sub-agent stays with its parent, whatever its own folder; the trailing slash is the same folder.
+  assert.deepEqual(idle.entries.map(e => e.row.address), ["a1", "a2", "kid", "b1", "none"]);
+  assert.deepEqual(idle.folders.map(f => [f.label, f.sessions]), [["api", 2], ["web", 1], ["No folder", 1]]);
+  // Another status is grouped on its own.
+  assert.deepEqual(sectionize(rows.filter(r => !r.machine)).find(s => s.id === "working").folders.map(f => f.key), ["/code/api"]);
+});
+
+test("paths read from each machine's home, and rows carry their pane's branch", () => {
+  assert.equal(shortPath("/Users/me/code/app"), "~/code/app");
+  assert.equal(shortPath("/home/me"), "~");
+  assert.equal(shortPath("/root/x"), "~/x");
+  assert.equal(shortPath("/Users/me2"), "~");
+  assert.equal(shortPath("/opt/Users/me"), "/opt/Users/me");
+  assert.equal(shortPath(null), "");
+  const rows = build(world({ panes: [{ pane: "p1", terminal: "t1", tab: "tb", cwd: "/code/app", branch: "main" }] }));
+  assert.equal(rows.find(r => r.address === "t1").branch, "main");
+});
+
+test("a finished session you open stays Done until you leave it", () => {
+  const rows = () => build(world({ terminals: [terminal("t1", "idle"), terminal("t2", "idle"), terminal("t3", "working")], focused: { terminal: "t1" } }));
+  const before = new Map([["t1", "done"], ["t2", "done"], ["t3", "done"]]);
+  const held = holdDone(rows(), before);
+  // Focused and seen: still Done. Not focused, or busy again: what Herdr says.
+  assert.equal(held.find(r => r.address === "t1").status, "done");
+  assert.equal(held.find(r => r.address === "t2").status, "idle");
+  assert.equal(holdDone(rows(), new Map([["t3", "done"]])).find(r => r.address === "t3").status, "working");
+  // Never Done before: nothing to hold.
+  assert.equal(holdDone(rows(), new Map()).find(r => r.address === "t1").status, "idle");
 });

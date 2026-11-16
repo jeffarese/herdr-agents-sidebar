@@ -60,6 +60,7 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
       pane: a?.pane ?? pane?.pane ?? null,
       parent: terminal?.parent ?? null,
       cwd,
+      branch: pane?.branch ?? null,
       pinned: Boolean(a?.pinned || terminal?.labels?.["herdr.pinned"]),
       focused: Boolean(a?.focused || focused?.terminal === address || focused?.shown === address),
       changed: terminal?.status_ms ?? terminal?.created_ms ?? 0,
@@ -97,7 +98,7 @@ function addSubagents(rows, fresh) {
         address: `${row.address}#${sub.id}`, machine: row.machine, kind: "agent", inner: true,
         title: sub.description || sub.type || "Sub-agent", status: "working", reported: "working",
         program: null, space: sub.type, pane: row.pane, terminal: row.address, parent: row.address,
-        cwd: row.cwd, pinned: false, focused: false, changed: sub.started, since: sub.started, seq: 0,
+        cwd: row.cwd, branch: row.branch, pinned: false, focused: false, changed: sub.started, since: sub.started, seq: 0,
         available: row.available, pid: null, inBackground: sub.background,
         background: [], goal: null, shells: [], helpers: [],
       });
@@ -141,6 +142,16 @@ function holdBackground(rows, fresh) {
     }
   }
   for (const row of rows) if (row.background.length) row.status = "working";
+}
+
+// Opening a finished session tells Herdr you've seen it, and it turns idle at once. Here it stays
+// Done while you're in it, and turns idle once you leave. `before`: address → the status each
+// row was shown with last time. Changes `rows` in place.
+export function holdDone(rows, before) {
+  for (const row of rows) {
+    if (!row.inner && row.focused && before.get(row.address) === "done" && (row.status === "idle" || row.status === "unknown")) row.status = "done";
+  }
+  return rows;
 }
 
 // The tooltip's account of background work, one line each.
@@ -204,6 +215,7 @@ export function sectionize(rows) {
     seen.add(row.address);
     return [{ row, depth }, ...(kids.get(row.address) ?? []).flatMap(kid => tree(kid, depth + 1))];
   };
+  // Each section holds trees (a session and its sub-agents), in priority order.
   const out = new Map(SECTIONS.map(section => [section.id, []]));
   // Roots first; anything left over (a parent cycle) is listed on its own.
   const roots = rows.filter(row => !row.parent || !listed.has(row.parent) || row.parent === row.address);
@@ -212,9 +224,30 @@ export function sectionize(rows) {
     const entries = tree(row, 0);
     const top = Math.max(...entries.map((entry, i) => urgency(entry.row, i > 0)));
     const status = Object.keys(URGENT).find(key => URGENT[key] === top) ?? row.status;
-    out.get(sectionOf(row, status)).push(...entries);
+    out.get(sectionOf(row, status)).push(entries);
   }
-  return SECTIONS.map(section => ({ ...section, entries: out.get(section.id) })).filter(section => section.entries.length);
+  return SECTIONS.map(section => {
+    const folders = byFolder(out.get(section.id));
+    return { ...section, folders, entries: folders.flatMap(folder => folder.entries) };
+  }).filter(section => section.entries.length);
+}
+
+// "/Users/me/code/app" → "~/code/app", on any machine: each has its own home.
+export const shortPath = path => (path ?? "").replace(/^(?:\/(?:Users|home)\/[^/]+|\/root)(?=\/|$)/, "~");
+const folderKey = path => (path ?? "").replace(/(.)[\\/]+$/, "$1");
+
+// The sessions of one section, by the folder they work in: a folder's sessions sit together
+// where its first (most urgent) one would be. `sessions`: how many, each with what it started.
+function byFolder(trees) {
+  const folders = new Map();
+  for (const entries of trees) {
+    const key = folderKey(entries[0].row.cwd);
+    if (!folders.has(key)) folders.set(key, { key, path: key, label: shortPath(key) === "~" ? "~" : basename(key) || "No folder", entries: [], sessions: 0 });
+    const folder = folders.get(key);
+    folder.entries.push(...entries);
+    folder.sessions++;
+  }
+  return [...folders.values()];
 }
 
 export function groups(rows, machines, query = "", filter = "all") {

@@ -695,3 +695,142 @@ test("with only this computer there is no host heading, and its + moves to the t
   assert.ok(find(root, "host-local"));
   assert.ok(find(root, "host-remote:work"));
 });
+
+test("sessions of one status in the same folder get a folder heading; a lone one names its folder", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "idle", title: "Fix login", program: { name: "Claude", agent: true }, cwd: "/Users/me/api", status_ms: 300 },
+    { address: "t2", state: "live", status: "idle", title: "Docs", program: { name: "Claude", agent: true }, cwd: "/Users/me/web", status_ms: 200 },
+    { address: "t3", state: "live", status: "idle", title: "Tests", program: { name: "Claude", agent: true }, cwd: "/Users/me/api", status_ms: 100 },
+    { address: "t4", state: "live", status: "working", title: "Build", program: { name: "Claude", agent: true }, cwd: "/Users/me/api" },
+  ];
+  const root = h.view.render();
+  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id), [
+    "section-local:working", "agent-t4",
+    "section-local:idle", "folder-local:idle:/Users/me/api", "agent-t1", "agent-t3", "agent-t2", "add-machine",
+  ]);
+  assert.match(text(find(root, "folder-local:idle:/Users/me/api")), /api 2/);
+  // Under the heading the folder isn't repeated, and the rows sit further in.
+  assert.doesNotMatch(text(find(root, "agent-t1")), /api/);
+  assert.ok(find(root, "agent-t1").props.pl > find(root, "agent-t2").props.pl);
+  // Alone in its status, a session names its folder beside its title.
+  assert.match(text(find(root, "agent-t2")), /web/);
+  assert.match(text(find(root, "agent-t4")), /api/);
+  // Navigation follows the list as shown.
+  assert.deepEqual(h.order(), ["t4", "t1", "t3", "t2"]);
+});
+
+test("the expanded view gives each session a second line with its folder and branch, for every copy", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.terminals = [{ address: "t1", state: "live", status: "idle", title: "Fix login", program: { name: "Claude", agent: true } }];
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "tb", cwd: "/Users/me/code/api", branch: "fix-login" }];
+  let root = h.view.render();
+  assert.equal(find(root, "agent-t1").props.h, 28);
+  assert.doesNotMatch(text(find(root, "agent-t1")), /fix-login/);
+  find(root, "density").props.on_click(null, h.cx);
+  assert.equal(h.sharedState["agent-sidebar.density"], "expanded");
+  root = h.view.render();
+  assert.equal(find(root, "agent-t1").props.h, 42);
+  assert.match(text(find(root, "agent-t1")), /~\/code\/api · fix-login/);
+  assert.equal(find(root, "density").props.aria_selected, true);
+  // The rail is unchanged: icons only.
+  h.view.width = 76;
+  assert.equal(find(h.view.render(), "agent-t1").props.h, 28);
+  h.view.width = 320;
+  find(h.view.render(), "density").props.on_click(null, h.cx);
+  assert.equal(h.sharedState["agent-sidebar.density"], "compact");
+  assert.equal(find(h.view.render(), "agent-t1").props.h, 28);
+});
+
+test("opening a finished session keeps it under Done until you move to another one", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.focused = { terminal: "t2" };
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "done", title: "Finished", program: { name: "Claude", agent: true } },
+    { address: "t2", state: "live", status: "idle", title: "Other", program: { name: "Claude", agent: true } },
+  ];
+  let root = h.view.render();
+  find(root, "agent-t1").props.on_click();
+  // Herdr marks it seen as you open it.
+  h.state.focused = { terminal: "t1" };
+  h.state.terminals[0].status = "idle";
+  root = h.view.render();
+  assert.ok(find(find(root, "host-agent-list"), "section-local:done"));
+  assert.equal(h.view.rows.find(r => r.address === "t1").status, "done");
+  root = h.view.render(); // and stays while you read
+  assert.equal(h.view.rows.find(r => r.address === "t1").status, "done");
+  h.state.focused = { terminal: "t2" };
+  root = h.view.render();
+  assert.equal(find(root, "section-local:done"), null);
+  assert.equal(h.view.rows.find(r => r.address === "t1").status, "idle");
+});
+
+const findStart = (node, prefix) => !node || typeof node !== "object" ? null
+  : String(node.props?.id ?? "").startsWith(prefix) ? node : node.nodes.map(child => findStart(child, prefix)).find(Boolean) ?? null;
+
+test("a status change fades its new mark in and tints news, once; the first render animates nothing", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.focused = null;
+  h.state.terminals = [{ address: "t1", state: "live", status: "working", title: "Busy", program: { name: "Claude", agent: true } }];
+  let root = h.view.render();
+  assert.equal(findStart(root, "mark-t1-").props.opacity, 1);
+  assert.equal(findStart(root, "tint-t1-"), null);
+  // No accent stripe on the row.
+  assert.equal(find(root, "agent-t1").props.border_l, undefined);
+  h.state.terminals[0].status = "blocked";
+  root = h.view.render();
+  // Drawn at the start of its transition...
+  assert.equal(findStart(root, "mark-t1-").props.opacity, 0);
+  assert.equal(findStart(root, "tint-t1-").props.opacity, 1);
+  assert.equal(findStart(root, "mark-t1-").props.transition[0], "left");
+  // ...and at its end on the next frame.
+  root = h.view.render();
+  assert.equal(findStart(root, "mark-t1-").props.opacity, 1);
+  assert.equal(findStart(root, "tint-t1-").props.opacity, 0);
+  // Each change is its own element, so the transition starts from nothing, not the old mark.
+  const id = findStart(root, "mark-t1-").props.id;
+  assert.notEqual(id, "mark-t1-settled");
+  // Going quiet moves the mark but tints nothing.
+  h.state.terminals[0].status = "idle";
+  root = h.view.render();
+  assert.equal(findStart(root, "tint-t1-"), null);
+});
+
+test("rows that change place slide from the old one, and those they pass make room; a new search does not slide", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.focused = null;
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "working", title: "First", program: { name: "Claude", agent: true } },
+    { address: "t2", state: "live", status: "idle", title: "Second", program: { name: "Claude", agent: true } },
+  ];
+  let root = h.view.render();
+  assert.equal(findStart(root, "slide-"), null);
+  // Working · First, Idle · Second  →  Needs you · Second, Working · First
+  h.state.terminals[1].status = "blocked";
+  root = h.view.render();
+  const second = findStart(root, "slide-row:t2-");
+  const first = findStart(root, "slide-row:t1-");
+  // Drawn where it was (section 24 + row 28 + section 24 below its new place), moving up...
+  assert.equal(second.props.top, 24 + 28 + 24 - 24);
+  assert.ok(find(second, "agent-t2"));
+  // ...and the one it passed drawn where it was too, moving down.
+  assert.equal(first.props.top, 24 - (24 + 28 + 24));
+  assert.equal(second.props.transition[0], "top");
+  assert.equal(findStart(root, "slide-section:local:blocked-").props.opacity, 0);
+  root = h.view.render();
+  assert.equal(findStart(root, "slide-row:t2-").props.top, 0);
+  assert.equal(findStart(root, "slide-row:t1-").props.top, 0);
+  // The new "Needs you" heading fades in where it lands rather than sliding.
+  assert.equal(findStart(root, "slide-section:local:blocked-").props.opacity, 1);
+  assert.equal(findStart(root, "slide-section:local:blocked-").props.top, undefined);
+  // Typing a search changes the list, not the sessions' places: nothing slides.
+  h.input.text = "second";
+  h.input.handlers.change(null, h.cx);
+  root = h.view.render();
+  assert.equal(findStart(root, "slide-"), null);
+});

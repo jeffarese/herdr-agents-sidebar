@@ -55,6 +55,7 @@ installer. Background work and sub-agents are read from Claude Code (tested with
 | See only what needs you, works or is done | Click a filter. Click it again for All. |
 | Keep a session near the top | Hover its row and click the pin. A pinned session that has nothing to report sits under Pinned, above the idle ones, and comes first in its section otherwise. |
 | Fold a machine or a section | Click its heading. A folded machine still shows how many sessions need you, work or are done. |
+| See where each session works | Click the lines button beside Settings (or bind a key to `agent-sidebar.density`). Expanded gives each session a second line with its folder and git branch; compact is one line. Every copy of the sidebar follows the choice. |
 | Start a shell or an agent on a machine | Click the machine's **+**, pick a folder, then the shell or agent (below). |
 | Start another session where one works | Hover its row and click its **+**: the launcher opens with that folder picked. |
 | Close a session | Hover its row and click **✕**: its pane closes, as ⌘W does in it. One that is working, needs you, has background work or runs a program asks first. |
@@ -118,6 +119,10 @@ Each machine lists its sessions in the sections Herdr's Agents list uses, most u
 
 Shells and programs follow the same rules as agents, and within a section everything is ordered
 by what changed last.
+
+Inside a section, sessions working in the same folder sit together under a heading with the
+folder's name, where the first of them would be. A session alone in its folder names it beside
+its title instead (or on its second line, expanded).
 
 Rows show how long a session has been in its state: `<1m`, `4m`, `2h`, `3d`. A session started
 by another one sits under it, and lifts it into its own most urgent section, except that a
