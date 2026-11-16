@@ -122,7 +122,8 @@ by what changed last.
 
 Inside a section, sessions working in the same folder sit together under a heading with the
 folder's name, where the first of them would be. A session alone in its folder names it beside
-its title instead (or on its second line, expanded).
+its title instead. Expanded, every session names its folder on its second line, so they sit
+together under no heading.
 
 Rows show how long a session has been in its state: `<1m`, `4m`, `2h`, `3d`. A session started
 by another one sits under it, and lifts it into its own most urgent section, except that a

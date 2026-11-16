@@ -623,8 +623,9 @@ export default class AgentSidebar extends View {
         const open = this.isOpen(`${group.key}:${section.id}`);
         for (const folder of section.folders) {
           // A heading only gathers: one session's folder is on its own row. Sessions with no
-          // folder known are not a folder.
-          const grouped = open && Boolean(folder.key) && folder.sessions > 1;
+          // folder known are not a folder. Expanded, every row's second line names its folder, so
+          // the sessions still sit together but under no heading.
+          const grouped = open && !this.expanded && Boolean(folder.key) && folder.sessions > 1;
           if (grouped) push(this.folderHeading(t, group, section, folder), `folder:${group.key}:${section.id}:${folder.key}`, HEIGHT.folder);
           for (const entry of folder.entries) if (open || entry.row.focused) add(entry.row, this.row(t, entry, section.id, now, grouped));
         }

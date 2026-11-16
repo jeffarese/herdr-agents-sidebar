@@ -721,6 +721,23 @@ test("sessions of one status in the same folder get a folder heading; a lone one
   assert.deepEqual(h.order(), ["t4", "t1", "t3", "t2"]);
 });
 
+test("expanded, sessions in one folder still sit together, under no heading: each row names it", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "idle", title: "Fix login", program: { name: "Claude", agent: true }, cwd: "/Users/me/api", status_ms: 300 },
+    { address: "t2", state: "live", status: "idle", title: "Docs", program: { name: "Claude", agent: true }, cwd: "/Users/me/web", status_ms: 200 },
+    { address: "t3", state: "live", status: "idle", title: "Tests", program: { name: "Claude", agent: true }, cwd: "/Users/me/api", status_ms: 100 },
+  ];
+  h.sharedState["agent-sidebar.density"] = "expanded";
+  const root = h.view.render();
+  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id), [
+    "section-local:idle", "agent-t1", "agent-t3", "agent-t2", "add-machine",
+  ]);
+  assert.match(text(find(root, "agent-t1")), /~\/api/);
+  assert.equal(find(root, "agent-t1").props.pl, find(root, "agent-t2").props.pl, "no heading, no indent");
+});
+
 test("the expanded view gives each session a second line with its folder and branch, for every copy", () => {
   const h = setup();
   h.state.machines = [{ name: null, layout: "ready" }];
