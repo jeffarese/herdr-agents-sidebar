@@ -1,9 +1,10 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
 import { PROBE, PROBE_MS, KIND, CHANGES, PULLS, parseChanges, parsePulls, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
+import { initSettings, renderSettings, SETTINGS } from "./settings.js";
 
 const ART = "mods/agent-sidebar/";
 const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
@@ -23,11 +24,9 @@ const DOUBLE_CLICK_MS = 400;
 const PROBE_GAP_MS = 1000;
 // "compact": one line per session; "expanded": two, the second saying where it works. The
 // person's choice, so every copy (and layout) shows the same.
-const DENSITY_KEY = "agent-sidebar.density";
 const ROW = { compact: 28, expanded: 40 };
 // "status": sections by what each session is doing; "space": a section for each of Herdr's
 // spaces. The person's choice too.
-const GROUP_KEY = "agent-sidebar.group";
 // What kind of machine each one is ("" for this computer), for its icon: asked once a start,
 // and kept so the next start shows it at once.
 const KINDS_KEY = "agent-sidebar.kinds";
@@ -45,7 +44,7 @@ const EFFORT_COLOR = { low: "muted", medium: "ansi4", high: "ansi2", xhigh: "ans
 // Asks Claude (Sonnet, low effort) through Claude Code's own print mode on this computer: no
 // tools, no session kept. PATH as a login would have it: the app's own may lack it.
 const ORGANIZE_SH = 'command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:$PATH"; exec claude "$@" < /dev/null';
-const ORGANIZE_ARGS = ["-p", "--model", "sonnet", "--effort", "low", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--output-format", "json"];
+const organizeArgs = cfg => ["-p", "--model", cfg.organizeModel, "--effort", cfg.organizeEffort, "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--output-format", "json"];
 const NAME_MS = 15000;
 // How often each machine is asked what its folders changed, and (through GitHub) for their
 // pull requests; and how many folders at most.
@@ -86,6 +85,9 @@ export default class AgentSidebar extends View {
     const initial = props() ?? {};
     this.launcher = Boolean(initial.launcher);
     if (this.launcher) { initLauncher(this, initial, cx); return; }
+    // The gear's popup is this mod too, showing its settings.
+    if (initial.settings) { initSettings(this); return; }
+    this.cfg = settingsOf(shared(SETTINGS_KEY));
     this.selected = null;
     this.hovered = null;
     this.width = Infinity;
@@ -101,6 +103,9 @@ export default class AgentSidebar extends View {
     this.naming = [];
     // Claude's suggestion for the spaces: null, "asking", or { renames, moves } to apply.
     this.plan = null;
+    // The moves of that suggestion the person took out, and which asking an answer is for.
+    this.skip = new Set();
+    this.asks = 0;
     // Sessions parked by a move, until Herdr shows them in their new space: not "leaving".
     this.parked = new Set();
     this.drag = null;
@@ -142,6 +147,9 @@ export default class AgentSidebar extends View {
         else if (command === "browse") this.browse();
         else if (command === "density") this.toggleDensity();
         else if (command === "group") this.toggleGroup();
+        else if (command === "settings") this.openSettings("dialog");
+        // Asks Claude; again, puts its suggestion (or the asking) away.
+        else if (command === "organize") this.plan ? this.dismissPlan() : this.organize();
         cx.notify();
       }
     });
@@ -252,13 +260,13 @@ export default class AgentSidebar extends View {
       const state = this.git.get(machine);
       const ask = (script, list, timeout, apply) => exec("sh", ["-c", script, "sh", ...list], { on: machine, timeout })
         .then(result => { if (result.code === 0) { apply(result.stdout); this.changed = true; answered(); } }).catch(() => { /* asked again later */ });
-      if (now - state.asked >= CHANGES_MS) {
+      if (this.cfg.changes && now - state.asked >= CHANGES_MS) {
         state.asked = now;
         const list = [...folders.keys()];
         ask(CHANGES, list, 15000, out => { state.changes = parseChanges(out, list); });
       }
       const branches = [...folders].filter(([, branch]) => branch).map(([folder]) => folder);
-      if (branches.length && now - state.pulled >= PULLS_MS) {
+      if (this.cfg.pulls && branches.length && now - state.pulled >= PULLS_MS) {
         state.pulled = now;
         ask(PULLS, branches, 30000, out => { state.pulls = parsePulls(out, branches); });
       }
@@ -315,8 +323,8 @@ export default class AgentSidebar extends View {
       if (key) ys.set(key, y);
       y += heights[i];
     });
-    const view = [this.expanded, this.bySpace, this.byProject, Boolean(this.moving), this.replying, typeof this.plan, this.width, this.single, compact].join("|");
-    if (this.ys && this.view === view && !compact) {
+    const view = [this.expanded, this.bySpace, this.byProject, Boolean(this.moving), this.replying, this.plan === "asking" ? 1 : this.plan ? 2 : 0, this.width, this.single, compact].join("|");
+    if (this.ys && this.view === view && !compact && this.cfg.animations) {
       for (const [key, now_] of ys) {
         const was = this.ys.get(key);
         if (was === undefined) this.moves.set(key, { offset: 0, enter: true, at: now, step: 0 });
@@ -342,23 +350,12 @@ export default class AgentSidebar extends View {
     setShared(DENSITY_KEY, shared(DENSITY_KEY) === "expanded" ? "compact" : "expanded");
   }
 
-  densityButton(t) {
-    const expanded = this.expanded;
-    const tip = expanded ? "Compact: one line per session" : "Expanded: show each session's folder";
-    return div().id("density").size(26).flex_none().rounded(6).flex().items_center().justify_center()
-      .role("button").aria_selected(expanded).accessibility_label(tip)
-      .cursor_pointer().text_color(expanded ? t.foreground : t.muted).when(expanded, el => el.bg(t.selected))
-      .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
-      .on_click((_e, cx) => { this.toggleDensity(); cx.notify(); })
-      .child(glyph("rows", 15));
-  }
-
   // Choosing where sessions go: every space they can go to takes the next click (or the drop).
   // `from`: the space they are in, which is no destination.
   startMove(rows, title, from, dragged = false) {
-    const movable = rows.filter(row => row.available && !row.inner);
-    if (!movable.length) return;
-    this.moving = { addresses: movable.map(row => row.address), title, from, machine: movable[0].machine, dragged };
+    const list = rows.filter(movable);
+    if (!list.length) return;
+    this.moving = { addresses: list.map(row => row.address), title, from, machine: list[0].machine, dragged };
   }
 
   // Parks each session's pane; finishMoves() labels it into the space once the pane is gone.
@@ -411,7 +408,8 @@ export default class AgentSidebar extends View {
     const row = (this.rows ?? []).find(row => row.address === address);
     if (!text || !canReply(row)) return;
     const failed = why => notify({ title: `Could not send to ${row.title}`, body: String(why ?? "").trim().slice(0, 160), level: "warning" });
-    hc(["send", address, text]).then(result => { if (result.code !== 0) failed(result.stderr || result.stdout); }).catch(failed);
+    // "--": a message that starts with a dash is still a message.
+    hc(["send", "--", address, text]).then(result => { if (result.code !== 0) failed(result.stderr || result.stdout); }).catch(failed);
   }
 
   replyField(t, row, indent) {
@@ -422,12 +420,13 @@ export default class AgentSidebar extends View {
       .child(div().flex_none().text_size(10).text_color(t.dim).child("Esc cancels"));
   }
 
-  // Closes every session idle for over a day, on a second click.
+  // Closes every session idle for too long (the settings say how long), on a second click.
   cleanUp(t, list) {
     const armed = Date.now() - (this.armedClean ?? 0) < ARMED_MS;
     const n = `${list.length} ${list.length === 1 ? "session" : "sessions"}`;
+    const long = { 1: "a day", 3: "3 days", 7: "a week" }[this.cfg.cleanupDays];
     return h_flex().id("clean-up").h(26).flex_none().rounded(6).px(8).gap(8).items_center()
-      .role("button").accessibility_label(armed ? `Click again to close ${n}` : `Close ${n} idle for over a day`)
+      .role("button").accessibility_label(armed ? `Click again to close ${n}` : `Close ${n} idle for over ${long}`)
       .tooltip(list.slice(0, 8).map(row => row.title).join("\n") + (list.length > 8 ? `\n+${list.length - 8} more` : ""))
       .cursor_pointer().text_size(11.5).text_color(armed ? t.blocked : t.dim).when(armed, el => el.bg(t.blocked + "26"))
       .hover(s => s.bg(armed ? t.blocked + "33" : t.hover).text_color(armed ? t.blocked : t.foreground))
@@ -441,7 +440,7 @@ export default class AgentSidebar extends View {
         cx.notify();
       })
       .child(glyph("x", 13))
-      .child(armed ? `Click again to close ${n}` : `Close ${n} idle for over a day`);
+      .child(armed ? `Click again to close ${n}` : `Close ${n} idle for over ${long}`);
   }
 
   // Claude Code sessions that ended: a click starts one again where it left off.
@@ -484,15 +483,25 @@ export default class AgentSidebar extends View {
     const { prompt, ids } = organizeBrief(rows, spaces());
     if (!ids.size) return;
     this.plan = "asking";
-    const failed = why => { this.plan = null; notify({ title: "Could not organize the sessions", body: String(why ?? "").trim().slice(0, 200), level: "warning" }); };
-    exec("sh", ["-c", ORGANIZE_SH, "sh", ...ORGANIZE_ARGS, "--json-schema", JSON.stringify(ORGANIZE_SCHEMA), "--system-prompt", ORGANIZE_SYSTEM, prompt], { on: null, timeout: 120000 }).then(result => {
+    this.skip = new Set();
+    // An answer to an asking that was dismissed is dropped.
+    const ask = ++this.asks;
+    const failed = why => { if (ask !== this.asks) return; this.plan = null; notify({ title: "Could not organize the sessions", body: String(why ?? "").trim().slice(0, 200), level: "warning" }); };
+    exec("sh", ["-c", ORGANIZE_SH, "sh", ...organizeArgs(this.cfg), "--json-schema", JSON.stringify(ORGANIZE_SCHEMA), "--system-prompt", ORGANIZE_SYSTEM, prompt], { on: null, timeout: 120000 }).then(result => {
       let answer = null;
       try { const out = JSON.parse(result.stdout); answer = out.structured_output ?? JSON.parse(out.result); } catch { /* said below */ }
+      if (ask !== this.asks) return;
       if (result.code !== 0 || !answer) return failed(result.stderr || "Claude Code gave no answer. Is `claude` installed and signed in on this computer?");
       const plan = organizePlan(this.rows ?? rows, spaces(), answer, ids, machine => `${machine == null ? "" : `${machine}/`}sp${hex(32)}`);
       if (plan.renames.length || plan.moves.length) this.plan = plan;
       else { this.plan = null; notify({ title: "Already organized", body: "Claude would leave every session where it is.", level: "info", timeout: 3000 }); }
     }).catch(failed).finally(() => { this.changed = true; answered(); });
+  }
+
+  dismissPlan() {
+    this.plan = null;
+    this.asks++;
+    this.skip = new Set();
   }
 
   applyPlan() {
@@ -501,6 +510,7 @@ export default class AgentSidebar extends View {
     if (!plan || plan === "asking") return;
     for (const rename of plan.renames) run("space.rename", { id: rename.id, name: rename.to });
     for (const move of plan.moves) {
+      if (this.skip.has(move.address)) continue;
       const row = (this.rows ?? []).find(row => row.address === move.address);
       if (!canMove(row, move.to) || this.pending.some(other => other.address === move.address)) continue;
       this.pending.push({ address: move.address, row, space: move.to, name: move.name, created: move.created, quiet: true, at: Date.now() });
@@ -510,7 +520,7 @@ export default class AgentSidebar extends View {
 
   organizeButton(t) {
     const asking = this.plan === "asking";
-    const tip = asking ? "Asking Claude…" : "Organize into spaces with Claude (Sonnet, low effort): suggests, then asks";
+    const tip = asking ? "Asking Claude…" : `Organize into spaces with Claude (${this.cfg.organizeModel}, ${this.cfg.organizeEffort} effort): previews, then asks`;
     return div().id("organize").size(26).flex_none().rounded(6).flex().items_center().justify_center()
       .role("button").accessibility_label(tip).cursor_pointer().text_color(asking ? t.accent : t.muted)
       .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
@@ -518,29 +528,34 @@ export default class AgentSidebar extends View {
       .child(asking ? glyph("sparkles", 15).loop("opacity", { from: 0.35, to: 1, period: 1200 }) : glyph("sparkles", 15));
   }
 
-  // What Claude suggests, to apply or dismiss. `height`: what it takes in the list.
-  planPanel(t, plan) {
-    const lines = [
-      ...plan.renames.map(rename => `Rename ${rename.from} to ${rename.to}`),
-      ...[...new Set(plan.moves.map(move => move.to))].map(to => {
-        const group = plan.moves.filter(move => move.to === to);
-        return `${group[0].created ? "New space" : "To"} ${group[0].name}: ${group.map(move => move.title).join(", ")}`;
-      }),
-    ];
-    const shown = lines.slice(0, 7);
-    const button = (id, label, strong, action) => div().id(id).h(20).px(8).flex_none().rounded(5).flex().items_center().text_size(10.5).font_medium()
+  // Over the list while Claude is asked, and while its suggestion is shown: the list below is
+  // then the sessions as it would leave them, to apply or dismiss.
+  planBanner(t, preview) {
+    const button = (id, label, strong, action) => div().id(id).h(22).px(9).flex_none().rounded(5).flex().items_center().text_size(11).font_medium()
       .role("button").accessibility_label(label).cursor_pointer()
-      .text_color(strong ? t.foreground : t.muted).when(strong, el => el.bg(t.selected)).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .when(strong, el => el.bg(t.accent).text_color(t.background).hover(s => s.opacity(0.88)))
+      .when(!strong, el => el.text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)))
       .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
-    const node = v_flex().id("plan").flex_none().mx(2).mb(4).p(8).gap(4).rounded(6).bg(t.raised)
-      .child(h_flex().gap(6).items_center().text_size(11).font_medium()
-        .child(glyph("sparkles", 12).text_color(t.accent)).child(div().child("Claude suggests")))
-      .children(shown.map(line => div().min_w(0).truncate().text_size(11).text_color(t.muted).tooltip(line).child(line)))
-      .when(lines.length > shown.length, el => el.child(div().text_size(10.5).text_color(t.dim).child(`+${lines.length - shown.length} more`)))
-      .child(h_flex().gap(6).mt(2).items_center()
-        .child(button("plan-apply", `Apply ${plan.moves.length ? `· moves ${plan.moves.length}` : ""}`.trim(), true, () => this.applyPlan()))
-        .child(button("plan-dismiss", "Dismiss", false, () => { this.plan = null; })));
-    return { node, height: 16 + 18 + shown.length * 20 + (lines.length > shown.length ? 20 : 0) + 26 + 4 };
+    const dismiss = () => this.dismissPlan();
+    const box = v_flex().id("plan").flex_none().mx(2).mb(4).px(9).py(8).gap(5).rounded(6).bg(t.raised).border(1).border_color(t.accent + "55");
+    if (!preview) {
+      return box.child(h_flex().gap(7).items_center()
+        .child(glyph("sparkles", 13).text_color(t.accent).loop("opacity", { from: 0.35, to: 1, period: 1100 }))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child("Asking Claude how to arrange them…"))
+        .child(button("plan-dismiss", "Cancel", false, dismiss)));
+    }
+    const count = (n, one, many) => n ? `${n} ${n === 1 ? one : many}` : "";
+    const summary = [count(preview.moved.size, "session moves", "sessions move"), count(preview.created.size, "new space", "new spaces"),
+      count(preview.renamed.size, "space renamed", "spaces renamed")].filter(Boolean).join(" · ") || "Nothing would change";
+    return box
+      .child(h_flex().gap(7).items_center()
+        .child(glyph("sparkles", 13).text_color(t.accent))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child("Claude's suggestion, previewed below")))
+      .child(div().text_size(11).text_color(t.muted).child(summary))
+      .child(div().text_size(10.5).text_color(t.dim).child("Highlighted sessions would move. Click one to leave it where it is. Nothing changes until you apply; Esc dismisses."))
+      .child(h_flex().gap(6).mt(1).items_center()
+        .child(button("plan-apply", "Apply", true, () => this.applyPlan()))
+        .child(button("plan-dismiss", "Dismiss", false, dismiss)));
   }
 
   recolor(space) {
@@ -557,6 +572,8 @@ export default class AgentSidebar extends View {
   // A press on a row or a space heading that moves onto another element is a drag: a session
   // dragged onto a space moves there; a space dragged onto another takes its place in the order.
   press(drag) {
+    // A new press: whatever an earlier drag left behind is over.
+    this.dragged = null;
     this.drag = this.moving ? null : { ...drag, over: drag.home, moved: false };
   }
 
@@ -569,15 +586,19 @@ export default class AgentSidebar extends View {
     cx.notify();
   }
 
-  // The release. On a space heading (`section`): the drop. Anywhere else: the drag is over.
-  release(cx, group = null, section = null) {
+  // The release. On a space heading (`section`), or on a session of another space (`onto`):
+  // the drop. Anywhere else: the drag is over.
+  release(cx, group = null, section = null, onto = null) {
     const drag = this.drag;
     this.drag = null;
     if (!drag?.moved) return;
     // A press that left and came back is no click.
     this.dragged = drag.home;
-    const space = section?.space || null;
-    if (drag.row && space && this.isTarget(group, section)) this.moveTo(space);
+    const space = section?.space || onto?.spaceId || null;
+    if (drag.row && space && (section ? this.isTarget(group, section) : canMove(drag.row, space))) {
+      if (!this.moving) this.startMove([drag.row], drag.row.title, drag.row.spaceId, true);
+      this.moveTo(space);
+    }
     else if (drag.row && this.moving?.dragged) this.moving = null;
     else if (drag.space && space && space !== drag.space && drag.machine === (group.name ?? null)) {
       const index = spaces().findIndex(other => other.id === space);
@@ -605,17 +626,6 @@ export default class AgentSidebar extends View {
 
   groupBy() {
     return GROUPINGS.includes(shared(GROUP_KEY)) ? shared(GROUP_KEY) : "status";
-  }
-
-  groupButton(t) {
-    const on = this.groupBy() !== "status";
-    const tip = GROUP_TIP[this.groupBy()];
-    return div().id("group").size(26).flex_none().rounded(6).flex().items_center().justify_center()
-      .role("button").aria_selected(on).accessibility_label(tip)
-      .cursor_pointer().text_color(on ? t.foreground : t.muted).when(on, el => el.bg(t.selected))
-      .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
-      .on_click((_e, cx) => { this.toggleGroup(); cx.notify(); })
-      .child(glyph("spaces", 15));
   }
 
   // Sessions of one status working in the same folder, when there are several.
@@ -656,16 +666,25 @@ export default class AgentSidebar extends View {
       .cursor_pointer().text_size(11.5).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_click(() => run("mod.open", { name: "machine-add" }))
       .child(glyph("plus", 13));
+    if (!this.cfg.addMachine) return compact ? [this.settingsButton(t).mt(6).mx_auto()] : [];
     return compact ? [add.mt(6).justify_center(), this.settingsButton(t).mx_auto()]
       : [add.mt(6).px(8).child("Add machine")];
   }
 
+  // At the pointer from the gear, centered from a key (bind one to agent-sidebar.settings).
+  openSettings(kind = "popup") {
+    openOverlay({ mod: "agent-sidebar", kind, width: SETTINGS.width, height: SETTINGS.height, props: { settings: true } });
+  }
+
+  // The sidebar's own settings (settings.js), in a popup at the pointer. Herdr's are a click
+  // further, inside it; an update that is ready still shows here.
   settingsButton(t) {
     const ready = Boolean(updates().app.ready);
+    const tip = ready ? "Sessions settings · Herdr update ready" : "Sessions settings";
     return div().id("settings").relative().size(26).flex_none().rounded(6).flex().items_center().justify_center()
-      .role("button").accessibility_label(ready ? "Settings, update ready" : "Settings")
+      .role("button").accessibility_label(tip)
       .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
-      .tooltip(ready ? "Settings · update ready" : "Settings").on_click(() => run("app.settings"))
+      .tooltip(tip).on_click(() => this.openSettings())
       .child(glyph("settings", 15))
       .when(ready, el => el.child(div().absolute().top(5).right(5).size(6).rounded(3).bg(t.accent)));
   }
@@ -728,7 +747,9 @@ export default class AgentSidebar extends View {
   // "+120 −8 #42" after an expanded row's folder: lines changed since the last commit, and the
   // branch's pull request in its state's color.
   gitTag(t, row) {
-    const { changes, pull } = this.gitOf(row);
+    const found = this.gitOf(row);
+    const changes = this.cfg.changes ? found.changes : null;
+    const pull = this.cfg.pulls ? found.pull : null;
     const dirty = changes && (changes.added || changes.removed);
     if (!dirty && !pull) return null;
     return h_flex().id(`git-${row.address}`).flex_none().gap(4).items_center().text_size(10.5)
@@ -747,14 +768,13 @@ export default class AgentSidebar extends View {
 
   // The same, at a glance, in words: `label` is the model's name and `context` its tokens, or
   // none where there is no room. The effort has its level's color: it is what differs most.
-  uses(t, row, label, context = "") {
-    const effort = row.effort ?? "";
+  uses(t, row, label, context = "", effort = row.effort ?? "") {
     if (!label && !effort) return null;
     return h_flex().id(`uses-${row.address}`).flex_none().gap(3).items_center().text_size(10.5).text_color(t.dim).tooltip(this.usesText(row))
       .when(Boolean(label), el => el.child(div().child(label)))
       .when(Boolean(label && effort), el => el.child(div().child("·")))
-      .when(Boolean(effort), el => el.child(div().id(`effort-${row.address}`).text_color(t[EFFORT_COLOR[effort]] ?? t.muted)
-        .when(effort === "max", el => el.font_semibold()).child(effort)))
+      .when(Boolean(effort), el => el.child(div().id(`effort-${row.address}`).text_color(this.cfg.effortColors ? t[EFFORT_COLOR[effort]] ?? t.muted : t.muted)
+        .when(this.cfg.effortColors && effort === "xhigh", el => el.font_medium()).when(this.cfg.effortColors && effort === "max", el => el.font_semibold()).child(effort)))
       .when(Boolean(context), el => el.child(div().child("·")).child(div().child(context)));
   }
 
@@ -766,7 +786,10 @@ export default class AgentSidebar extends View {
     const picked = this.selected === row.address;
     const hovered = this.hovered === row.address && row.available;
     // A sub-agent inside a session has no terminal to pin.
-    const pinning = hovered && !row.inner;
+    // In a preview a session that would move says where from, and a click takes it out or back in.
+    const leaves = this.preview?.moved.get(row.address);
+    const stays = Boolean(this.preview) && this.skip.has(row.address);
+    const pinning = hovered && !row.inner && !this.preview;
     const quiet = row.kind === "agent" && (row.status === "idle" || row.status === "unknown") && !on;
     // Where it works: a sub-agent's kind, else its folder. On the second line when expanded;
     // otherwise beside the title, unless a folder heading says it, the title already does, or
@@ -778,14 +801,17 @@ export default class AgentSidebar extends View {
     // ("Opus 5.5") where the folder leaves room, else its family, and a folder too long for what
     // is left gives way from its start. Compact, after the title when both fit, else the effort
     // alone, else only in the tooltip; the folder comes after that.
-    const name = modelName(row.model);
-    const effort = name && row.effort ? row.effort : "";
+    const cfg = this.cfg;
+    const known = cfg.model || cfg.effort ? modelName(row.model) : null;
+    // With the model off, the effort stands alone.
+    const name = known && (cfg.model ? known : { family: "", label: "" });
+    const effort = known && cfg.effort && row.effort ? row.effort : "";
     const px = (Number.isFinite(this.width) ? this.width : WIDE) - 104 - indent;
     const said = label => [label, effort].filter(Boolean).join(" · ");
     // What it is doing or asking, while it works or needs you: in place of the folder, which
     // stays in the tooltip.
-    const doing = activityText(row);
-    const used = tokens(row.context);
+    const doing = cfg.activity ? activityText(row) : "";
+    const used = cfg.context ? tokens(row.context) : "";
     // Lines changed and the pull request: beside the folder, so not while it gives way to `doing`.
     const git = expanded && !doing ? this.gitTag(t, row) : null;
     // By project, sessions of several machines share a list: one elsewhere says where.
@@ -811,7 +837,7 @@ export default class AgentSidebar extends View {
     const detail = expanded ? "" : doing ? (row.title.length + doing.length + 2 <= room ? doing : "")
       : !(grouped && !row.inner) && folder && !row.title.toLowerCase().includes(folder.toLowerCase())
         && row.title.length + folder.length + 2 <= room ? folder : "";
-    const uses = shown ? this.uses(t, row, model, context) : null;
+    const uses = shown ? this.uses(t, row, model, context, effort) : null;
     const tip = this.tip(row, now);
     const pin = div().id(`pin-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
       .role("button").accessibility_label(row.pinned ? `Unpin ${row.title}` : `Pin ${row.title}`)
@@ -852,7 +878,7 @@ export default class AgentSidebar extends View {
       })
       .child(glyph("reply", 12));
     // To another space: every space it can go to then takes the click.
-    const others = !row.inner && spaces().filter(space => (space.machine ?? null) === row.machine && space.id !== row.spaceId).length > 0;
+    const others = movable(row) && spaces().filter(space => (space.machine ?? null) === row.machine && space.id !== row.spaceId).length > 0;
     const move = div().id(`move-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
       .role("button").accessibility_label(`Move ${row.title} to another space`)
       .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
@@ -882,7 +908,7 @@ export default class AgentSidebar extends View {
         }
         cx.notify();
       });
-    const age = row.kind === "agent" && row.since && row.available ? duration(now - row.since) : "";
+    const age = cfg.age && row.kind === "agent" && row.since && row.available ? duration(now - row.since) : "";
     // An open /goal, unless the mark already says so.
     const goal = Boolean(row.goal) && row.background[0] !== "goal" && !pinning;
     // Fresh news: a wash of its color, drawn under the row's content, fading out.
@@ -917,10 +943,18 @@ export default class AgentSidebar extends View {
         if (!inside && this.armed?.address === row.address) this.armed = null;
         cx.notify();
       })
-      .tooltip(tip).on_click(() => { if (this.clicked(`row:${row.address}`)) this.open(row); })
-      .when(row.available && !row.inner, el => el.on_mouse_down("left", () => this.press({ row, home: `row:${row.address}` })))
+      .tooltip(leaves !== undefined ? `Would move here from ${leaves} · click to leave it there` : stays ? "Stays where it is · click to move it after all" : tip)
+      .on_click((_e, cx) => {
+        if (!this.clicked(`row:${row.address}`)) return;
+        if (leaves !== undefined) this.skip.add(row.address);
+        else if (stays) this.skip.delete(row.address);
+        else return this.open(row);
+        cx?.notify?.();
+      })
+      .when(leaves !== undefined, el => el.bg(t.accent + "22"))
+      .when(movable(row) && !this.preview, el => el.on_mouse_down("left", () => this.press({ row, home: `row:${row.address}` })))
       .on_mouse_move((_e, cx) => this.dragOver(`row:${row.address}`, cx))
-      .on_mouse_up("left", (_e, cx) => this.release(cx))
+      .on_mouse_up("left", (_e, cx) => this.release(cx, null, null, row))
       .when(this.moving?.addresses.includes(row.address) || this.pending.some(move => move.address === row.address), el => el.opacity(0.5))
       .when(Boolean(tint), el => el.child(tint))
       .when(Boolean(row.parent), el => el.child(glyph("sub", 11).ml(-2).mr(-4).text_color(t.dim)))
@@ -936,7 +970,9 @@ export default class AgentSidebar extends View {
         .when(!armed, el => el.child(pin))
         .child(close)))
       .when(!expanded && !pinning && Boolean(elsewhere), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(elsewhere)))
-      .when(!expanded && !pinning && Boolean(uses), el => el.child(uses))
+      .when(leaves !== undefined, el => el.child(div().id(`moves-${row.address}`).flex_none().max_w(110).truncate().text_size(10.5).text_color(t.accent).child(`from ${leaves}`)))
+      .when(stays, el => el.child(div().id(`stays-${row.address}`).flex_none().text_size(10.5).text_color(t.dim).child("stays")))
+      .when(!expanded && !pinning && Boolean(uses) && leaves === undefined && !stays, el => el.child(uses))
       .when(!pinning && Boolean(age), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(age)))
       .child(this.mark(t, row, section));
   }
@@ -964,7 +1000,8 @@ export default class AgentSidebar extends View {
     const dot = space ? t[shared("space.colors")?.[space] ?? SPACE_COLORS[0]] : null;
     // While sessions are being moved, a space they can go to says so and takes the click.
     const target = this.isTarget(group, section);
-    const hovered = this.hoveredSection === key && Boolean(space) && !this.moving;
+    const hovered = this.hoveredSection === key && Boolean(space) && !this.moving && !this.preview;
+    const fresh = this.preview?.created.has(space) ? "new" : this.preview?.renamed.has(space) ? `was ${this.preview.renamed.get(space)}` : "";
     const act = (id, icon, tip, action) => div().id(`${id}-${key}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
       .role("button").accessibility_label(`${tip}: ${section.label}`).cursor_pointer().text_color(t.muted)
       .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
@@ -987,18 +1024,19 @@ export default class AgentSidebar extends View {
         if (!this.clicked(`section:${key}`)) return;
         if (target) { this.moveTo(space); cx.notify(); return; }
         // The second click of a double one: the first folded it, this unfolds it again.
-        if (space && e?.click_count === 2) run("space.rename", { id: space });
+        if (space && e?.click_count === 2 && !this.preview) run("space.rename", { id: space });
         this.toggle(key, cx);
       })
-      .when(Boolean(space), el => el
+      .when(Boolean(space) && !this.preview, el => el
         .on_mouse_down("right", () => this.spaceMenu(space))
         .on_mouse_down("left", () => this.press({ space, machine: group.name ?? null, home: `section:${key}` })))
       .on_mouse_move((_e, cx) => this.dragOver(`section:${key}`, cx))
       .on_mouse_up("left", (_e, cx) => this.release(cx, group, section))
       .when(Boolean(dot), el => el.child(div().id(`color-${key}`).size(8).flex_none().rounded(4).bg(dot).cursor_pointer().tooltip("Change color")
-        .on_click((_e, cx) => { cx.stop_propagation(); this.recolor(space); cx.notify(); })))
+        .on_click((_e, cx) => { cx.stop_propagation(); if (!this.preview) this.recolor(space); cx.notify(); })))
       .child(div().min_w(0).truncate().text_color(target ? t.foreground : color).child(section.label))
       .child(div().flex_none().text_color(t.dim).child(String(n)))
+      .when(Boolean(fresh), el => el.child(div().id(`fresh-${key}`).flex_none().max_w(120).truncate().px(4).rounded(4).bg(t.accent + "22").text_size(9.5).text_color(t.accent).child(fresh)))
       .child(div().flex_1())
       .when(target, el => el.child(div().flex_none().text_size(10).text_color(t.accent).child("Move here")))
       .when((section.space !== undefined || section.project) && !open && !target && !hovered, el => el.children(this.summary(t, { rows })))
@@ -1102,6 +1140,8 @@ export default class AgentSidebar extends View {
 
   render() {
     if (this.launcher) return renderLauncher(this);
+    if (this.panel) return renderSettings(this);
+    const cfg = this.cfg = settingsOf(shared(SETTINGS_KEY));
     const t = /** @type {Record<string, import("gpui-kit").Color>} */ (theme());
     const hosts = machines();
     const now = Date.now();
@@ -1113,6 +1153,7 @@ export default class AgentSidebar extends View {
     const all = holdDone(dropLeaving(built, this.leaving, this.placed, placed, now, staying), this.shown ?? new Map());
     this.placed = placed;
     this.notice(all, now);
+    if (!cfg.animations) this.fresh.clear();
     // Background work starts or ends when an agent's status changes: ask its machine again.
     const reported = new Map();
     for (const row of all) {
@@ -1127,12 +1168,19 @@ export default class AgentSidebar extends View {
     if (gone.length) setShared(CLOSED_KEY, gone.reduce((list, seen) => remember(list, seen, now), shared(CLOSED_KEY) ?? []));
     for (const row of all) if (row.kind === "agent" && !row.inner && row.available && row.session) this.known.set(row.address, { title: row.title, cwd: row.cwd, machine: row.machine, session: row.session });
     if (this.replying && !canReply(all.find(row => row.address === this.replying))) this.replying = null;
-    const tally = counts(all);
+    // What the settings leave out of the list is still there: a sub-agent still holds its session
+    // in Working, and a shell is still found by its address.
+    const listed = cfg.subagents && cfg.shells ? all : all.filter(row => (cfg.subagents || !row.inner) && (cfg.shells || row.kind === "agent"));
+    const tally = counts(listed);
     // Sessions move between spaces, so choosing where shows the spaces whatever the grouping.
     if (this.moving && !this.moving.addresses.some(address => all.some(row => row.address === address))) this.moving = null;
-    this.bySpace = this.groupBy() === "space" || Boolean(this.moving);
+    // Claude's suggestion is looked at as the spaces it would make: the same list, as it would be.
+    const preview = this.plan && this.plan !== "asking" ? previewOf(listed, spaces(), this.plan, this.skip) : null;
+    this.preview = preview;
+    this.bySpace = this.groupBy() === "space" || Boolean(this.moving) || Boolean(preview);
     this.byProject = !this.bySpace && this.groupBy() === "project";
-    const sections = groups(all, hosts, this.bySpace ? "space" : this.byProject ? "project" : "status", spaces());
+    const sections = groups(preview ? preview.rows : listed, hosts, this.bySpace ? "space" : this.byProject ? "project" : "status", preview ? preview.spaces : spaces())
+      .filter(group => cfg.away || !isAway(group));
     const compact = this.width < RAIL;
     this.expanded = shared(DENSITY_KEY) === "expanded";
     // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
@@ -1163,10 +1211,7 @@ export default class AgentSidebar extends View {
       .child(div().id("moving-cancel").flex_none().px(5).h(18).rounded(4).flex().items_center().text_size(10.5).text_color(t.muted)
         .role("button").accessibility_label("Cancel the move").cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Cancel · Esc")
         .on_click((_e, cx) => { this.moving = null; cx.notify(); }).child("Cancel")), "moving", 28);
-    if (this.plan && this.plan !== "asking" && !compact) {
-      const panel = this.planPanel(t, this.plan);
-      push(panel.node, "plan", panel.height);
-    }
+    if (this.plan && !compact) push(this.planBanner(t, preview), "plan", preview ? 108 : 40);
     if (this.single && compact) push(h_flex().h(30).flex_none().justify_center().items_center().child(this.newButton(t, local)));
     const firstAway = sections.findIndex(isAway);
     sections.forEach((group, i) => {
@@ -1190,7 +1235,7 @@ export default class AgentSidebar extends View {
           // folder known are not a folder. Expanded, every row's second line names its folder, so
           // the sessions still sit together but under no heading.
           // Nor grouped by space: a space is the grouping.
-          const grouped = open && !this.expanded && !this.bySpace && Boolean(folder.key) && folder.sessions > 1;
+          const grouped = cfg.folders && open && !this.expanded && !this.bySpace && !this.byProject && Boolean(folder.key) && folder.sessions > 1;
           if (grouped) push(this.folderHeading(t, group, section, folder), `folder:${group.key}:${section.id}:${folder.key}`, HEIGHT.folder);
           for (const entry of folder.entries) if (open || entry.row.focused) add(entry.row, this.row(t, entry, section.id, now, grouped));
         }
@@ -1199,15 +1244,15 @@ export default class AgentSidebar extends View {
         .child(group.layout === "ready" ? "No sessions yet · use + to start one" : group.layout === "loading" ? "Loading sessions…" : "Sessions appear when this host reconnects"), `empty:${group.key}`, HEIGHT.empty);
     });
     this.slide(t, children, keys, heights, compact, now);
+    children.push(...this.extras(t, compact));
     if (!compact) {
-      // Only when there is something to close, or to reopen.
-      const old = stale(all, now);
-      if (old.length) children.push(this.cleanUp(t, old).mt(6));
+      // Under everything, and only when there is something to close, or to reopen.
+      const old = cfg.cleanup ? stale(all, now, cfg.cleanupDays * STALE_SESSION_MS) : [];
+      if (old.length) children.push(this.cleanUp(t, old));
       const closed = (shared(CLOSED_KEY) ?? []).filter(entry => !all.some(row => row.session === entry.session)
         && hosts.some(host => (host.name ?? null) === (entry.machine ?? null)));
-      if (closed.length) children.push(...this.closedList(t, closed, now));
+      if (cfg.closed && closed.length) children.push(...this.closedList(t, closed, now));
     }
-    children.push(...this.extras(t, compact));
     setAgentOrder(this.visible.filter(r => r.kind === "agent" && !r.inner).map(r => r.address));
     // Drawn at their start: the next frame draws them at their end.
     let started = false;
@@ -1227,8 +1272,12 @@ export default class AgentSidebar extends View {
           // Out of a move; else back to the current session.
           this.selected = null;
           if (this.replying) { this.replying = null; this.reply.set_value(""); }
+          else if (this.plan) this.dismissPlan();
           else if (this.moving) this.moving = null;
           else this.open(this.visible.find(r => r.focused));
+        } else if (this.replying) {
+          // Every other key is the message's.
+          return;
         } else if (e.key === "enter") {
           const row = this.visible.find(r => r.address === this.selected);
           if (!row) return;
@@ -1245,15 +1294,14 @@ export default class AgentSidebar extends View {
         cx.notify();
       })
       .when(!compact, el => el
-        .child(h_flex().id("sessions-header").h(34).flex_none().pl(16).pr(10).gap(6).items_center()
-          .child(div().font_semibold().text_size(14).child("Sessions"))
-          .child(div().id("sessions-count").text_size(11.5).text_color(t.muted).child(String(tally.all)))
+        // Narrow, the buttons keep their room: the title gives way, and under 270 px the count goes.
+        .child(h_flex().id("sessions-header").h(34).flex_none().pl(16).pr(10).gap(4).items_center()
+          .child(div().min_w(0).truncate().font_semibold().text_size(14).child("Sessions"))
+          .when(this.width >= 270, el => el.child(div().id("sessions-count").flex_none().ml(2).text_size(11.5).text_color(t.muted).child(String(tally.all))))
           .child(div().flex_1())
           .when(this.single && this.bySpace, el => el.child(this.newSpaceButton(t, local, 26)))
           .when(this.single || this.byProject, el => el.child(this.newButton(t, local, 26)))
-          .child(this.organizeButton(t))
-          .child(this.groupButton(t))
-          .child(this.densityButton(t))
+          .when(this.cfg.organize, el => el.child(this.organizeButton(t)))
           .child(this.settingsButton(t))))
       .when(compact, el => el.child(h_flex().h(34).flex_none().justify_center().items_center()
         .child(iconButton("expand-agents", "panel-left", "Expand sessions", () => this.expand()))))

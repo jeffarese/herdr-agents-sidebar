@@ -410,8 +410,10 @@ export function closeAction(row) {
 // Moving a session to another space of its machine. Herdr has no command for it, but shows a
 // terminal wherever its labels say: so its pane is parked (terminal.park; it keeps running),
 // and then `hc` is given these arguments, which make it a new tab of that space. A space lives
-// on one machine, and so does a session; a sub-agent inside a session can't move by itself.
-export const canMove = (row, space) => Boolean(row?.available && !row.inner && space && machineOf(space) === row.machine && row.spaceId !== space);
+// on one machine, and so does a session. A sub-agent can't move by itself: not one inside a
+// session, and not a terminal an agent started, which belongs to that agent's tab.
+export const movable = row => Boolean(row?.available && !row.inner && !row.parent);
+export const canMove = (row, space) => Boolean(movable(row) && space && machineOf(space) === row.machine && row.spaceId !== space);
 export function moveArgs(row, space, tab) {
   // Labels use the machine's own ids: without the "<machine>/" the app puts before them.
   const local = id => row.machine == null ? id : id.slice(row.machine.length + 1);
@@ -433,11 +435,11 @@ export const ORGANIZE_SCHEMA = { type: "object", required: ["machines"], propert
 export function organizeBrief(rows, spaces) {
   const ids = new Map();
   const lines = [];
-  const machines = [...new Set(rows.filter(row => row.available && !row.inner).map(row => row.machine))];
+  const machines = [...new Set(rows.filter(movable).map(row => row.machine))];
   for (const machine of machines) {
     const names = spaces.filter(space => (space.machine ?? null) === machine).map(space => JSON.stringify(space.name));
     lines.push(`Machine ${JSON.stringify(machine ?? "local")}. Spaces now: ${names.join(", ") || "none"}. Sessions:`);
-    for (const row of rows.filter(row => row.available && !row.inner && row.machine === machine)) {
+    for (const row of rows.filter(row => movable(row) && row.machine === machine)) {
       const id = `s${ids.size + 1}`;
       ids.set(id, row.address);
       lines.push(`- ${id}: ${JSON.stringify(row.title.slice(0, 80))}, ${row.kind === "agent" ? "agent" : "shell"}, in ${shortPath(row.cwd) || "?"}${row.branch ? ` on ${row.branch}` : ""}, space ${row.spaceId ? JSON.stringify(row.space) : "none"}`);
@@ -460,7 +462,7 @@ export function organizePlan(rows, spaces, answer, ids, newId) {
     const mine = spaces.filter(space => (space.machine ?? null) === machine);
     const wanted = (Array.isArray(group?.spaces) ? group.spaces : []).map(space => ({
       name: String(space?.name ?? "").trim().slice(0, 40),
-      rows: [...new Set(Array.isArray(space?.sessions) ? space.sessions : [])].map(id => byAddress.get(ids.get(id))).filter(row => row && row.machine === machine && !row.inner && row.available),
+      rows: [...new Set(Array.isArray(space?.sessions) ? space.sessions : [])].map(id => byAddress.get(ids.get(id))).filter(row => movable(row) && row.machine === machine),
     })).filter(space => space.name && space.rows.length);
     const names = new Set(wanted.map(space => space.name.toLowerCase()));
     const taken = new Set();
@@ -490,17 +492,65 @@ export function organizePlan(rows, spaces, answer, ids, newId) {
   return { renames, moves };
 }
 
+// The list as a plan would leave it, to look at before applying: `rows` with each moved session
+// in its new space, `spaces` with the renamed and the new ones, and what to mark: `moved`
+// (address → the space it leaves), `created` (ids), `renamed` (id → the old name). A move in
+// `skip` (addresses the person took out) stays where it is.
+export function previewOf(rows, spaces, plan, skip = new Set()) {
+  const renamed = new Map(plan.renames.map(rename => [rename.id, rename]));
+  const moves = new Map(plan.moves.filter(move => !skip.has(move.address)).map(move => [move.address, move]));
+  const created = new Map([...moves.values()].filter(move => move.created).map(move => [move.to, move]));
+  const order = new Map(spaces.map((space, i) => [space.id, i]));
+  const name = id => renamed.get(id)?.to ?? spaces.find(space => space.id === id)?.name ?? created.get(id)?.name ?? "";
+  const moved = new Map();
+  const out = rows.map(row => {
+    const move = moves.get(row.address) ?? (row.inner || row.parent ? moves.get(row.parent) : null);
+    if (move && !row.inner && row.address === move.address) moved.set(row.address, row.spaceId ? row.space : "no space");
+    const spaceId = move ? move.to : row.spaceId;
+    return spaceId === row.spaceId && !renamed.has(spaceId) ? row
+      : { ...row, spaceId, space: row.inner ? row.space : name(spaceId), spaceOrder: order.get(spaceId) ?? spaces.length };
+  });
+  return {
+    rows: out, moved, created: new Set(created.keys()), renamed: new Map([...renamed].map(([id, rename]) => [id, rename.from])),
+    spaces: [...spaces.map(space => renamed.has(space.id) ? { ...space, name: renamed.get(space.id).to } : space),
+      ...[...created].map(([id, move]) => ({ id, name: move.name, machine: machineOf(id), tabs: [] }))],
+  };
+}
+
 // A message can be sent to an agent that is not waiting on a dialog: typed into one, it would
 // answer it. Never to a shell, where it would run.
 export const canReply = row => Boolean(row?.available && row.kind === "agent" && !row.inner && row.reported !== "blocked");
 
-// Sessions with nothing to say for over a day, which Clean up closes: not the one you are in,
-// a pinned one, or one with a goal or work still running.
+// The sidebar's settings, in Herdr's shared state: the person's, so every copy and layout
+// follows. Density and grouping have keys of their own (a key can be bound to each).
+export const DENSITY_KEY = "agent-sidebar.density";
+export const GROUP_KEY = "agent-sidebar.group";
+export const SETTINGS_KEY = "agent-sidebar.settings";
+export const DEFAULTS = {
+  folders: true, subagents: true, shells: true, away: true,
+  model: true, effort: true, effortColors: true, activity: true, context: true, changes: true, pulls: true, age: true,
+  addMachine: true, closed: true, cleanup: true, cleanupDays: 1,
+  organize: true, organizeModel: "sonnet", organizeEffort: "low",
+  animations: true,
+};
+const CHOICES = { cleanupDays: [1, 3, 7], organizeModel: ["haiku", "sonnet", "opus"], organizeEffort: ["low", "medium", "high"] };
+// What is saved, over the defaults: anything missing or not one of a setting's values is the default.
+export function settingsOf(saved) {
+  const out = { ...DEFAULTS };
+  for (const key of Object.keys(DEFAULTS)) {
+    const value = saved?.[key];
+    if (CHOICES[key] ? CHOICES[key].includes(value) : typeof value === "boolean") out[key] = value;
+  }
+  return out;
+}
+
+// Sessions with nothing to say for long enough (a day, unless `after` says otherwise), which
+// Clean up closes: not the one you are in, a pinned one, or one with a goal or work running.
 export const STALE_SESSION_MS = 24 * 3600 * 1000;
-export function stale(rows, now = Date.now()) {
+export function stale(rows, now = Date.now(), after = STALE_SESSION_MS) {
   return rows.filter(row => row.kind === "agent" && !row.inner && row.available && !row.pinned && !row.focused
     && !row.background.length && !row.goal && ["idle", "done", "unknown"].includes(row.status)
-    && Boolean(row.since) && now - row.since > STALE_SESSION_MS);
+    && Boolean(row.since) && now - row.since > after);
 }
 
 // Claude Code sessions that ended since they were last seen, to offer again. `known`: address →

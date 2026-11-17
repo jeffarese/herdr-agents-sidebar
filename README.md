@@ -27,7 +27,8 @@ From a clone, `./install.sh` does the same. Run it again to update, and `./insta
 to take it all out again.
 
 It needs the Herdr app (tested with 0.1.15), herdr-core (tested with 0.1.21) and `python3` for the
-installer. Background work and sub-agents are read from Claude Code (tested with 2.1.323).
+installer. Background work, sub-agents, and each session's model and effort are read from Claude Code
+(tested with 2.1.326).
 
 ### What the installer changes
 
@@ -35,8 +36,8 @@ installer. Background work and sub-agents are read from Claude Code (tested with
   after Herdr's own checker passes it. If the installed copy then fails the check, the previous
   version is put back.
 - In the layout Herdr shows, the sidebar takes the place of Herdr's Spaces and Agents lists.
-  Other blocks in the sidebar stay below it. The footer under the sidebar goes, because Settings
-  and Add machine are in the sidebar itself. A separately docked Outside panel goes too: its
+  Other blocks in the sidebar stay below it. The footer under the sidebar goes, because Add machine is in
+  the sidebar itself and Herdr's settings are one click inside the sidebar's own. A separately docked Outside panel goes too: its
   agents are already in this list.
 - Herdr's own layouts are read-only, so when one of them is showing, the sidebar goes into a
   copy of it called `<name>-agents` (a copy of `main` if the shown one has no sidebar). A layout of
@@ -51,13 +52,22 @@ installer. Background work and sub-agents are read from Claude Code (tested with
 | To | Do |
 | --- | --- |
 | Open a session | Click it. Herdr focuses its pane, or peeks at it if it has none. |
+| Change what the sidebar shows | Click the gear in the title bar (or bind a key to `agent-sidebar.settings`). The settings are the sidebar's own: rows and grouping; folder headings, sub-agents, shells and machines that are away; what each session shows (model, effort and its colors, what it is doing, context size, lines changed, pull request, time in its state); the lines under the list (Add machine, Recently closed, Clean up and how old is old); the Organize button with its model and effort; and motion. Each is kept in Herdr's shared state, so every copy of the sidebar follows. Turning off lines changed or pull requests also stops asking git or GitHub for them. **Herdr settings…** at the bottom opens Herdr's own, and **Reset** brings the defaults back. |
 | Pick one from the keyboard | With the sidebar focused (`pane.go`), Up and Down move through the sessions and Enter opens the one picked; Escape returns to the current session. |
 | Keep a session near the top | Hover its row and click the pin. A pinned session that has nothing to report sits under Pinned, above the idle ones, and comes first in its section otherwise. |
 | Fold a machine or a section | Click its heading. A folded machine still shows how many sessions need you, work or are done. |
-| Group sessions by space | Click the layers button in the title bar (or bind a key to `agent-sidebar.group`). Each of Herdr's spaces becomes a heading, in Herdr's order and with the space's color, holding its sessions by urgency; a folded space shows what it holds. Click again for the status sections. Every copy of the sidebar follows the choice. |
-| See which model and effort a session runs with | Expanded, each Claude Code session's second line ends with them, as in `Opus 5.5 · xhigh`; compact, `Opus · xhigh` follows the title when there is room. The tooltip always has them. They are those of the session's last turn. |
+| Group sessions by space, or by project | Choose **Group by** in the settings (or bind a key to `agent-sidebar.group`, which goes from status to spaces to projects and round again). By space, each of Herdr's spaces is a heading, in Herdr's order and with its color, holding its sessions by urgency; one with no session keeps its heading. By project, spaces of one name on every machine are one heading, under no machine, and a session elsewhere says where. Whatever the grouping, what needs you comes first. Every copy of the sidebar follows the choice. |
+| See which model and effort a session runs with | Expanded, each Claude Code session's second line ends with them, as in `Opus 5.5 · xhigh · 159k`: the model, its effort in a color that warms with it (gray, blue, green, yellow, red), and the context its last turn was sent when there is room. Compact, `Opus · xhigh` follows the title when it fits. The tooltip always has them. |
+| See what a session is doing, or wants | While a Claude Code session works, its second line (expanded) or the space after its title (compact, when it fits) says its last step, as in `Bash · Run the tests`. One that needs you says what for: `Asks · Which database?`, `Wants Bash · Delete the build folder`. |
+| See what a session changed, and its pull request | Expanded, a session's folder is followed by the lines added and removed since the last commit there, and by its branch's pull request number in its state's color (needs the GitHub CLI, `gh`). The tooltip has the link. |
+| Manage a space | Grouped by space, hover a space's heading: **+** starts a shell or agent in it, the arrows move all its sessions to another space, **⋯** (or a right-click) opens Herdr's own menu to rename or close it. Double-click the heading to rename, click its dot to change its color, drag it onto another to reorder. A machine's heading (or the title bar, with one machine) has a button for a new space. |
+| Move a session to another space | Hover its row and click the arrow, then click the space; or drag the row onto the space. Its pane closes and it reappears as a tab of that space, still running. Spaces of other machines are no destination. Escape cancels. |
+| Let Claude organize the spaces | Click the star in the title bar. Claude (Sonnet, low effort, through Claude Code on this computer) is shown each session's title, folder, branch and space, and suggests spaces by project. While it is asked a banner says so. Its suggestion is then shown as a preview: the list becomes the spaces as they would be, with new and renamed spaces marked and each session that would move highlighted, saying where from. Click a highlighted session to leave it where it is. Nothing changes until **Apply**; **Dismiss** or Escape puts it away. A key can be bound to `agent-sidebar.organize`. |
+| Send a session a message | Hover an agent's row and click the paper plane, type, Enter. It is pasted and submitted as `hc send` does. Not offered for a shell, or for an agent waiting on a dialog. |
+| Close what is old | When sessions have been idle for over a day, a line under the list closes them all, on a second click. Pinned ones, the one you are in and any with work running stay. |
+| Reopen a closed session | Claude Code sessions that ended are kept under **Recently closed** (the last eight). Click one to resume it in its folder. |
 | See the sessions of a machine that is away | A machine Herdr can't reach is one dim line after the others. Click it to show the sessions it had when last seen; they can't be opened until it is back. |
-| See where each session works | Click the lines button beside Settings (or bind a key to `agent-sidebar.density`). Expanded gives each session a second line with its folder and git branch (a folder too long for the line loses its start, not its end); compact is one line. Every copy of the sidebar follows the choice. |
+| See where each session works | Choose **Expanded** rows in the settings (or bind a key to `agent-sidebar.density`). Each session gets a second line with its folder and git branch (a folder too long for the line loses its start, not its end); compact is one line. Every copy of the sidebar follows the choice. |
 | Start a shell or an agent on a machine | Click the machine's **+**, pick a folder, then the shell or agent (below). |
 | Start another session where one works | Hover its row and click its **+**: the launcher opens with that folder picked. |
 | Close a session | Hover its row and click **✕**: its pane closes, as ⌘W does in it. One that is working, needs you, has background work or runs a program asks first. |
@@ -159,7 +169,8 @@ own commands there. The script looks at:
 - **Claude Code's session file** for that process, `~/.claude/sessions/<pid>.json` (or under
   `$CLAUDE_CONFIG_DIR`), which says whether it is busy, waiting on a shell, or idle;
 - **the session's transcript**, for its last goal record and for the model and effort of its
-  last turn, of which only those two words are printed. After the first look it reads only what
+  last turn, its context size, and the start of that turn's last tool call (its name and at most
+  480 bytes of its input, such as a command or a file name): only those are printed. After the first look it reads only what
   was added since the last one;
 - **the transcripts of the session's sub-agents** that were written in the last 15 minutes, and
   only while the session is busy or asking you something (always, where there is no session
@@ -167,7 +178,12 @@ own commands there. The script looks at:
 
 The script changes nothing. What it prints, including the command lines of the processes under
 your agents, goes only to the Herdr app, over Herdr's own connection to that machine, and stays
-in memory there. The mod makes no network requests.
+in memory there. The mod itself makes no network requests. Two things it runs do, both yours and already signed
+in: the GitHub CLI, asked every five minutes for the pull request of each session's branch (not
+for `main` or `master`, and not at all without `gh`), and Claude Code, once each time you click
+the star to organize the spaces, which sends Claude the sessions' titles, folders, branches and
+space names. Every half minute `git diff --shortstat` is run in each session's folder, without
+taking git's optional locks.
 
 Once at each start, another script of a few lines asks each machine what it is (`uname`, and
 on a Mac `sysctl hw.model` and `pmset -g batt`; elsewhere the chassis type under `/sys`), so
@@ -186,7 +202,10 @@ until it is updated. Other agents keep Herdr's status.
 
 ## Known limits
 
-- **Claude Code only** for background work, sub-agents, and model and effort. The model is
+- **Moving a session** closes its pane and gives its terminal the other space's labels; Herdr
+  has no command for it. If the second step fails, the session keeps running without a pane and
+  is listed under No space, where a click peeks at it.
+- **Claude Code only** for background work, sub-agents, what a session is doing, and model and effort. The model is
   looked for in the last 1 MB of a transcript on the first look, and in everything added after
   that. A session whose transcript can't be found (no session file, see below) shows the model
   it was started with (`claude --model …`), with no effort, or nothing if it was given none.
