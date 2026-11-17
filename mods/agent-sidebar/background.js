@@ -274,6 +274,56 @@ esac
 export const KINDS = ["laptop", "desktop", "server"];
 export const machineKind = output => KINDS.find(kind => kind === String(output ?? "").trim()) ?? null;
 
+// What each folder has changed since its last commit, and its branch's pull request. POSIX sh;
+// the folders are the arguments, and each answer names its folder by its place among them.
+// git is asked not to take its optional locks, so it never gets in the way of an agent's own
+// commit. Only PULLS talks to the network, through the GitHub CLI, when that is installed.
+export const CHANGES = `i=0
+for dir; do
+  i=$((i + 1))
+  [ -d "$dir" ] || continue
+  stat=$(GIT_OPTIONAL_LOCKS=0 git -C "$dir" diff --shortstat HEAD 2>/dev/null) || continue
+  printf 'D %s %s\\n' "$i" "$stat"
+done
+`;
+export const PULLS = `command -v gh >/dev/null 2>&1 || PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
+command -v gh >/dev/null 2>&1 || exit 0
+i=0
+for dir; do
+  i=$((i + 1))
+  [ -d "$dir" ] || continue
+  ( cd "$dir" 2>/dev/null && pull=$(gh pr view --json number,state,isDraft,url 2>/dev/null) && printf 'R %s %s\\n' "$i" "$pull" ) &
+done
+wait
+`;
+// folder → { files, added, removed }: zeros for a clean checkout, no entry for what isn't one.
+export function parseChanges(output, folders) {
+  const out = new Map();
+  for (const line of String(output ?? "").split("\n")) {
+    const m = /^D (\d+) ?(.*)$/.exec(line);
+    const folder = m && folders[Number(m[1]) - 1];
+    if (!folder) continue;
+    const count = word => Number(new RegExp(`(\\d+) ${word}`).exec(m[2])?.[1] ?? 0);
+    out.set(folder, { files: count("files? changed"), added: count("insertion"), removed: count("deletion") });
+  }
+  return out;
+}
+// folder → { number, state: "open" | "draft" | "merged" | "closed", url }.
+export function parsePulls(output, folders) {
+  const out = new Map();
+  for (const line of String(output ?? "").split("\n")) {
+    const m = /^R (\d+) (.+)$/.exec(line);
+    const folder = m && folders[Number(m[1]) - 1];
+    if (!folder) continue;
+    let pull;
+    try { pull = JSON.parse(m[2]); } catch { continue; }
+    if (!Number.isInteger(pull?.number)) continue;
+    const state = String(pull.state ?? "").toLowerCase();
+    out.set(folder, { number: pull.number, state: state === "open" && pull.isDraft ? "draft" : ["open", "merged", "closed"].includes(state) ? state : "open", url: typeof pull.url === "string" ? pull.url : "" });
+  }
+  return out;
+}
+
 // Claude Code runs every Bash command (foreground or background) as
 //   <shell> -c source …/shell-snapshots/snapshot-<shell>-….sh … && eval '<command>' < /dev/null && pwd -P >| …
 const SNAPSHOT = /[\\/]shell-snapshots[\\/]snapshot-/;

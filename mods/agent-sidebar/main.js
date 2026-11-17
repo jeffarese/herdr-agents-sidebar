@@ -1,8 +1,8 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
-import { PROBE, PROBE_MS, KIND, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { PROBE, PROBE_MS, KIND, CHANGES, PULLS, parseChanges, parsePulls, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
 const ART = "mods/agent-sidebar/";
@@ -47,6 +47,14 @@ const EFFORT_COLOR = { low: "muted", medium: "ansi4", high: "ansi2", xhigh: "ans
 const ORGANIZE_SH = 'command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:$PATH"; exec claude "$@" < /dev/null';
 const ORGANIZE_ARGS = ["-p", "--model", "sonnet", "--effort", "low", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--output-format", "json"];
 const NAME_MS = 15000;
+// How often each machine is asked what its folders changed, and (through GitHub) for their
+// pull requests; and how many folders at most.
+const CHANGES_MS = 30000;
+const PULLS_MS = 300000;
+const GIT_FOLDERS = 24;
+const PULL_COLOR = { open: "ansi2", draft: "dim", merged: "ansi5", closed: "ansi1" };
+const GROUPINGS = ["status", "space", "project"];
+const GROUP_TIP = { status: "Grouped by status · click for spaces", space: "Grouped by space · click for projects (spaces of one name, on every machine)", project: "Grouped by project · click for status" };
 const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
 // Sessions under a folder heading sit this much further in.
 const GROUPED_INDENT = 10;
@@ -148,11 +156,13 @@ export default class AgentSidebar extends View {
     this.asking = new Set(); // machines whose answer is on its way
     this.stale = new Set(); // machines to ask again as soon as allowed
     this.kinds = new Map(); // machine → true once it said what it is, else when it was asked
+    this.git = new Map(); // machine → { changes, pulls: folder → what git and GitHub said, asked, pulled: when }
     cx.spawn(async cx => {
       let wake = () => {};
       for (;;) {
         this.probe(() => wake());
         this.askKinds(() => wake());
+        this.askGit(() => wake());
         this.finishMoves();
         // A second, or less when an answer arrives or a move is under way.
         await Promise.race([cx.sleep(this.pending.length || this.naming.length ? 250 : 1000), new Promise(resolve => { wake = resolve; })]);
@@ -224,6 +234,37 @@ export default class AgentSidebar extends View {
     }
   }
 
+  // Asks each machine what its sessions' folders changed (git, every CHANGES_MS) and for the
+  // pull request of each branch that isn't the main one (the GitHub CLI, every PULLS_MS).
+  askGit(answered) {
+    const now = Date.now();
+    const byMachine = new Map();
+    for (const row of this.rows ?? []) {
+      if (!row.available || row.inner || !row.cwd || !row.cwd.startsWith("/")) continue;
+      if (!byMachine.has(row.machine)) byMachine.set(row.machine, new Map());
+      const folders = byMachine.get(row.machine);
+      const key = folderKey(row.cwd);
+      if (folders.size < GIT_FOLDERS || folders.has(key)) folders.set(key, folders.get(key) || Boolean(row.branch && !/^(main|master|HEAD)$/.test(row.branch)));
+    }
+    for (const machine of [...this.git.keys()]) if (!byMachine.has(machine)) this.git.delete(machine);
+    for (const [machine, folders] of byMachine) {
+      if (!this.git.has(machine)) this.git.set(machine, { changes: new Map(), pulls: new Map(), asked: 0, pulled: 0 });
+      const state = this.git.get(machine);
+      const ask = (script, list, timeout, apply) => exec("sh", ["-c", script, "sh", ...list], { on: machine, timeout })
+        .then(result => { if (result.code === 0) { apply(result.stdout); this.changed = true; answered(); } }).catch(() => { /* asked again later */ });
+      if (now - state.asked >= CHANGES_MS) {
+        state.asked = now;
+        const list = [...folders.keys()];
+        ask(CHANGES, list, 15000, out => { state.changes = parseChanges(out, list); });
+      }
+      const branches = [...folders].filter(([, branch]) => branch).map(([folder]) => folder);
+      if (branches.length && now - state.pulled >= PULLS_MS) {
+        state.pulled = now;
+        ask(PULLS, branches, 30000, out => { state.pulls = parsePulls(out, branches); });
+      }
+    }
+  }
+
   // The launcher: a folder, then a shell or an agent to start there. At the pointer from a +,
   // centered from the keyboard. `extra`: { folder, tag } to start from.
   launch(machine, extra = {}, kind = "popup") {
@@ -274,7 +315,7 @@ export default class AgentSidebar extends View {
       if (key) ys.set(key, y);
       y += heights[i];
     });
-    const view = [this.expanded, this.bySpace, Boolean(this.moving), this.replying, typeof this.plan, this.width, this.single, compact].join("|");
+    const view = [this.expanded, this.bySpace, this.byProject, Boolean(this.moving), this.replying, typeof this.plan, this.width, this.single, compact].join("|");
     if (this.ys && this.view === view && !compact) {
       for (const [key, now_] of ys) {
         const was = this.ys.get(key);
@@ -557,13 +598,18 @@ export default class AgentSidebar extends View {
     return Boolean(moving && section.space && section.space !== moving.from && moving.machine === (group.name ?? null));
   }
 
+  // Status, then spaces, then projects, and round again.
   toggleGroup() {
-    setShared(GROUP_KEY, shared(GROUP_KEY) === "space" ? "status" : "space");
+    setShared(GROUP_KEY, GROUPINGS[(GROUPINGS.indexOf(this.groupBy()) + 1) % GROUPINGS.length]);
+  }
+
+  groupBy() {
+    return GROUPINGS.includes(shared(GROUP_KEY)) ? shared(GROUP_KEY) : "status";
   }
 
   groupButton(t) {
-    const on = this.bySpace;
-    const tip = on ? "Group by status" : "Group by space";
+    const on = this.groupBy() !== "status";
+    const tip = GROUP_TIP[this.groupBy()];
     return div().id("group").size(26).flex_none().rounded(6).flex().items_center().justify_center()
       .role("button").aria_selected(on).accessibility_label(tip)
       .cursor_pointer().text_color(on ? t.foreground : t.muted).when(on, el => el.bg(t.selected))
@@ -665,7 +711,30 @@ export default class AgentSidebar extends View {
       : row.background.some(reason => reason !== "goal") ? "Working in the background" : "Goal active";
     const state = !row.available ? "Unavailable" : row.kind === "agent" && row.since ? `${word} · ${duration(now - row.since)}` : word;
     const from = !row.parent ? "" : row.inner ? `Inside ${row.parent}` : `Started from ${row.parent}`;
-    return [row.title, context, host, state, activityText(row), this.usesText(row), ...backgroundLines(row, now), row.inner ? "" : row.address, row.cwd, from].filter(Boolean).join("\n");
+    const git = this.gitOf(row);
+    const changed = git.changes && (git.changes.added || git.changes.removed)
+      ? `Uncommitted: +${git.changes.added} −${git.changes.removed} in ${git.changes.files} ${git.changes.files === 1 ? "file" : "files"}` : "";
+    const pull = git.pull ? `Pull request #${git.pull.number} · ${git.pull.state}${git.pull.url ? `\n${git.pull.url}` : ""}` : "";
+    return [row.title, context, host, state, activityText(row), this.usesText(row), changed, pull, ...backgroundLines(row, now), row.inner ? "" : row.address, row.cwd, from].filter(Boolean).join("\n");
+  }
+
+  // What git and GitHub said of the folder a session works in.
+  gitOf(row) {
+    const state = row.inner || !row.cwd ? null : this.git?.get(row.machine);
+    const key = folderKey(row.cwd);
+    return { changes: state?.changes.get(key) ?? null, pull: state?.pulls.get(key) ?? null };
+  }
+
+  // "+120 −8 #42" after an expanded row's folder: lines changed since the last commit, and the
+  // branch's pull request in its state's color.
+  gitTag(t, row) {
+    const { changes, pull } = this.gitOf(row);
+    const dirty = changes && (changes.added || changes.removed);
+    if (!dirty && !pull) return null;
+    return h_flex().id(`git-${row.address}`).flex_none().gap(4).items_center().text_size(10.5)
+      .when(Boolean(dirty) && changes.added > 0, el => el.child(div().text_color(t.ansi2).child(`+${changes.added}`)))
+      .when(Boolean(dirty) && changes.removed > 0, el => el.child(div().text_color(t.ansi1).child(`−${changes.removed}`)))
+      .when(Boolean(pull), el => el.child(div().text_color(t[PULL_COLOR[pull.state]] ?? t.dim).child(`#${pull.number}`)));
   }
 
   // "Opus 5.5 · xhigh effort · 159k context": what the session's last turn ran with, and how
@@ -717,6 +786,10 @@ export default class AgentSidebar extends View {
     // stays in the tooltip.
     const doing = activityText(row);
     const used = tokens(row.context);
+    // Lines changed and the pull request: beside the folder, so not while it gives way to `doing`.
+    const git = expanded && !doing ? this.gitTag(t, row) : null;
+    // By project, sessions of several machines share a list: one elsewhere says where.
+    const elsewhere = this.byProject && row.machine != null && !row.inner ? row.machine : "";
     let context = "";
     let model = "";
     let shown = Boolean(name);
@@ -727,7 +800,7 @@ export default class AgentSidebar extends View {
       const first = doing || where;
       model = first.length + said(name.label).length + 2 <= line ? name.label : name.family;
       context = used && first.length + said(model).length + used.length + 5 <= line ? used : "";
-      if (!row.inner && !doing) where = fitWhere(shortPath(row.cwd), row.branch, line - said(model).length - 2);
+      if (!row.inner && !doing) where = fitWhere(shortPath(row.cwd), row.branch, line - said(model).length - 2 - (git ? 12 : 0));
     } else if (name) {
       const fits = [said(name.family), effort].filter(Boolean).find(text => row.title.length + text.length + 2 <= room);
       shown = Boolean(fits);
@@ -825,7 +898,8 @@ export default class AgentSidebar extends View {
       ? v_flex().flex_1().min_w(0).gap(1)
         .child(title)
         .child(h_flex().min_w(0).gap(6).items_center()
-          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(doing ? t.muted : t.dim).child(where || " "))
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(doing ? t.muted : t.dim).child([elsewhere, where].filter(Boolean).join(" · ") || " "))
+          .when(Boolean(git), el => el.child(git))
           .when(Boolean(uses), el => el.child(uses)))
       : h_flex().flex_1().min_w(0).gap(5).items_center()
         .child(title)
@@ -861,6 +935,7 @@ export default class AgentSidebar extends View {
         .when(!armed && Boolean(row.cwd), el => el.child(here))
         .when(!armed, el => el.child(pin))
         .child(close)))
+      .when(!expanded && !pinning && Boolean(elsewhere), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(elsewhere)))
       .when(!expanded && !pinning && Boolean(uses), el => el.child(uses))
       .when(!pinning && Boolean(age), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(age)))
       .child(this.mark(t, row, section));
@@ -926,7 +1001,7 @@ export default class AgentSidebar extends View {
       .child(div().flex_none().text_color(t.dim).child(String(n)))
       .child(div().flex_1())
       .when(target, el => el.child(div().flex_none().text_size(10).text_color(t.accent).child("Move here")))
-      .when(section.space !== undefined && !open && !target && !hovered, el => el.children(this.summary(t, { rows })))
+      .when((section.space !== undefined || section.project) && !open && !target && !hovered, el => el.children(this.summary(t, { rows })))
       .when(hovered, el => el
         .child(act("space-new", "plus", "New shell or agent in this space", () => this.launch(group.name ?? null, { space })))
         .when(n > 0 && spaces().some(other => (other.machine ?? null) === (group.name ?? null) && other.id !== space),
@@ -1055,8 +1130,9 @@ export default class AgentSidebar extends View {
     const tally = counts(all);
     // Sessions move between spaces, so choosing where shows the spaces whatever the grouping.
     if (this.moving && !this.moving.addresses.some(address => all.some(row => row.address === address))) this.moving = null;
-    this.bySpace = shared(GROUP_KEY) === "space" || Boolean(this.moving);
-    const sections = groups(all, hosts, this.bySpace ? "space" : "status", spaces());
+    this.bySpace = this.groupBy() === "space" || Boolean(this.moving);
+    this.byProject = !this.bySpace && this.groupBy() === "project";
+    const sections = groups(all, hosts, this.bySpace ? "space" : this.byProject ? "project" : "status", spaces());
     const compact = this.width < RAIL;
     this.expanded = shared(DENSITY_KEY) === "expanded";
     // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
@@ -1094,9 +1170,11 @@ export default class AgentSidebar extends View {
     if (this.single && compact) push(h_flex().h(30).flex_none().justify_center().items_center().child(this.newButton(t, local)));
     const firstAway = sections.findIndex(isAway);
     sections.forEach((group, i) => {
-      if (!this.single) push(this.host(t, group, compact, i === 0, i === firstAway), `host:${group.key}`, hostHeight(group, i === 0, i === firstAway));
+      // By project there is one list for every machine, under no heading.
+      const headed = !this.single && !group.flat;
+      if (headed) push(this.host(t, group, compact, i === 0, i === firstAway), `host:${group.key}`, hostHeight(group, i === 0, i === firstAway));
       // A host folded back when there were several must not hide everything now.
-      if (!this.single && !this.hostOpen(group)) return;
+      if (headed && !this.hostOpen(group)) return;
       if (compact) {
         // Sub-agents stay in their session's tooltip: in a rail they would pass for sessions.
         for (const row of group.rows) if (!row.inner) add(row, this.railRow(t, row));
@@ -1117,7 +1195,7 @@ export default class AgentSidebar extends View {
           for (const entry of folder.entries) if (open || entry.row.focused) add(entry.row, this.row(t, entry, section.id, now, grouped));
         }
       }
-      if (!group.rows.length) push(div().pl(this.single ? 10 : 29).pr(12).pt(1).pb(5).text_size(11).text_color(t.muted)
+      if (!group.rows.length) push(div().pl(headed ? 29 : 10).pr(12).pt(1).pb(5).text_size(11).text_color(t.muted)
         .child(group.layout === "ready" ? "No sessions yet · use + to start one" : group.layout === "loading" ? "Loading sessions…" : "Sessions appear when this host reconnects"), `empty:${group.key}`, HEIGHT.empty);
     });
     this.slide(t, children, keys, heights, compact, now);
@@ -1172,7 +1250,7 @@ export default class AgentSidebar extends View {
           .child(div().id("sessions-count").text_size(11.5).text_color(t.muted).child(String(tally.all)))
           .child(div().flex_1())
           .when(this.single && this.bySpace, el => el.child(this.newSpaceButton(t, local, 26)))
-          .when(this.single, el => el.child(this.newButton(t, local, 26)))
+          .when(this.single || this.byProject, el => el.child(this.newButton(t, local, 26)))
           .child(this.organizeButton(t))
           .child(this.groupButton(t))
           .child(this.densityButton(t))
@@ -1180,7 +1258,7 @@ export default class AgentSidebar extends View {
       .when(compact, el => el.child(h_flex().h(34).flex_none().justify_center().items_center()
         .child(iconButton("expand-agents", "panel-left", "Expand sessions", () => this.expand()))))
       .child(v_flex().id("host-agent-list").flex_1().min_h(0).px(6).pt(compact ? 0 : 2).pb(12).overflow_y_scrollbar().track_scroll(this.scroll)
-        .role("list_box").accessibility_label(`Sessions grouped by ${this.single ? "" : "machine, then by "}${this.bySpace ? "space" : "status"}`)
+        .role("list_box").accessibility_label(`Sessions grouped by ${this.single || this.byProject ? "" : "machine, then by "}${this.bySpace ? "space" : this.byProject ? "project" : "status"}`)
         .children(children));
   }
 }

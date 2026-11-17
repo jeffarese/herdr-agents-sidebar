@@ -249,8 +249,16 @@ export function sectionize(rows, by = "status", spaces = []) {
     if (seen.has(row.address)) continue;
     const entries = tree(row, 0);
     // Whatever the grouping, what needs you leads: it must not wait inside a space.
-    if (by === "space" && Math.max(...entries.map((entry, i) => urgency(entry.row, i > 0))) === URGENT.blocked) {
+    if (by !== "status" && Math.max(...entries.map((entry, i) => urgency(entry.row, i > 0))) === URGENT.blocked) {
       out.get("blocked").push(entries);
+      continue;
+    }
+    // A project is every space of one name, on whatever machine.
+    if (by === "project") {
+      const name = row.spaceId ? row.space || "Space" : "No space";
+      const id = `project:${row.spaceId ? name.toLowerCase() : ""}`;
+      if (!held.has(id)) held.set(id, { id, label: name, status: null, project: true, order: row.spaceId ? 0 : 1, trees: [] });
+      held.get(id).trees.push(entries);
       continue;
     }
     if (by === "space") {
@@ -263,7 +271,7 @@ export function sectionize(rows, by = "status", spaces = []) {
     const status = Object.keys(URGENT).find(key => URGENT[key] === top) ?? row.status;
     out.get(sectionOf(row, status)).push(entries);
   }
-  if (by === "space") {
+  if (by !== "status") {
     const lead = out.get("blocked").length ? [{ ...SECTIONS[0], trees: out.get("blocked") }] : [];
     return [...lead, ...[...held.values()].sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))].map(({ trees, order, ...section }) => {
       const folders = byFolder(trees);
@@ -291,7 +299,7 @@ export function fitWhere(path, branch, room) {
   }
   return path + tail;
 }
-const folderKey = path => (path ?? "").replace(/(.)[\\/]+$/, "$1");
+export const folderKey = path => (path ?? "").replace(/(.)[\\/]+$/, "$1");
 
 // The sessions of one section, by the folder they work in: a folder's sessions sit together
 // where its first (most urgent) one would be. `sessions`: how many, each with what it started.
@@ -314,6 +322,16 @@ export function groups(rows, machines, by = "status", spaces = []) {
   if (!hosts.some(m => m.name == null)) hosts.push({ name: null, layout: "loading" });
   const rank = host => host.name == null ? 0 : host.layout === "unavailable" ? 2 : 1;
   hosts.sort((a, b) => rank(a) - rank(b) || (a.name ?? "").localeCompare(b.name ?? ""));
+  // By project, the machines that answer are one list; one that is away keeps its own line.
+  if (by === "project") {
+    const here = new Set(hosts.filter(host => host.layout !== "unavailable" || host.name == null).map(host => host.name ?? null));
+    const sections = sectionize(rows.filter(row => here.has(row.machine)), "project");
+    const all = { name: null, layout: "ready", key: "all", label: "All machines", remote: false, flat: true, sections, rows: sections.flatMap(section => section.entries.map(entry => entry.row)) };
+    return [all, ...hosts.filter(host => !here.has(host.name ?? null)).map(host => {
+      const away = sectionize(rows.filter(row => row.machine === host.name));
+      return { ...host, key: `remote:${host.name}`, label: host.name, remote: true, sections: away, rows: away.flatMap(section => section.entries.map(entry => entry.row)) };
+    })];
+  }
   return hosts.map(host => {
     const mine = rows.filter(row => row.machine === (host.name ?? null));
     const sections = sectionize(mine, by, spaces.filter(space => (space.machine ?? null) === (host.name ?? null)));

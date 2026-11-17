@@ -951,7 +951,10 @@ test("grouped by space, each space is a heading with its sessions; every copy fo
   root = h.view.render();
   assert.equal(find(root, "agent-t3"), null);
   assert.deepEqual(find(root, "section-local:space:s1").nodes.map(n => n.props?.tooltip).filter(tip => /working|done|needs/.test(tip ?? "")), ["1 working"]);
+  // Then projects, then status again.
   find(root, "group").props.on_click(null, h.cx);
+  assert.equal(h.sharedState["agent-sidebar.group"], "project");
+  find(h.view.render(), "group").props.on_click(null, h.cx);
   assert.equal(h.sharedState["agent-sidebar.group"], "status");
   assert.ok(find(h.view.render(), "section-local:blocked"));
 });
@@ -1333,4 +1336,53 @@ test("grouped by space, sessions in one folder get no folder heading", () => {
   assert.deepEqual(ids(h.view.render()).filter(id => id.startsWith("folder-")), []);
   h.sharedState["agent-sidebar.group"] = "status";
   assert.ok(ids(h.view.render()).some(id => id.startsWith("folder-")));
+});
+
+test("grouped by project, spaces of one name on every machine are one heading, under no machine", () => {
+  const h = spaced();
+  h.state.machines.push({ name: "attic", layout: "unavailable" });
+  h.state.spaces[2].name = "API"; // the remote space has this computer's space's name
+  h.state.terminals.push({ address: "attic/t1", state: "live", status: "idle", title: "Stale", program: { name: "Claude", agent: true } });
+  h.sharedState["agent-sidebar.group"] = "project";
+  h.view.width = 400;
+  const root = h.view.render();
+  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id),
+    ["section-all:project:api", "agent-t3", "agent-t1", "agent-work/t1", "section-all:project:billing", "agent-t2", "host-remote:attic", "add-machine"]);
+  assert.match(text(find(root, "section-all:project:api")), /API\s*3/);
+  // A session on another machine says which; the title bar starts one on this computer.
+  assert.match(text(find(root, "agent-work/t1")), /Remote task\s+work/);
+  assert.doesNotMatch(text(find(root, "agent-t1")), /work/);
+  assert.ok(find(root, "new-local"));
+  // A project is not a space: nothing to rename or move into there.
+  assert.equal(find(hover(h, "section-all:project:api"), "space-new-all:project:api"), null);
+});
+
+test("a session's folder says what it changed and its pull request, asked of each machine at their own pace", async () => {
+  const h = setup();
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "tb", cwd: "/Users/me/code/api/", branch: "fix-login" }, { pane: "work/p1", terminal: "work/t1", tab: "work/tb", cwd: "/srv/app", branch: "main" }];
+  h.sharedState["agent-sidebar.density"] = "expanded";
+  h.view.width = 420;
+  h.view.render();
+  h.answer(async (_cmd, args, opts) => {
+    if (args[1] === background.CHANGES) return { code: 0, stderr: "", stdout: opts.on ? "D 1 \n" : "D 1  3 files changed, 120 insertions(+), 8 deletions(-)\n" };
+    return { code: 0, stderr: "", stdout: 'R 1 {"number":42,"state":"OPEN","isDraft":true,"url":"https://github.com/me/api/pull/42"}\n' };
+  });
+  let answers = 0;
+  h.view.askGit(() => answers++);
+  // Changes from both machines; pull requests only where a branch is not the main one.
+  assert.deepEqual(h.execs.map(([, args, opts]) => [args[1] === background.CHANGES ? "changes" : "pulls", opts.on, args.slice(3)]).sort((a, b) => String(a[1]).localeCompare(String(b[1])) || a[0].localeCompare(b[0])),
+    [["changes", null, ["/Users/me/code/api"]], ["pulls", null, ["/Users/me/code/api"]], ["changes", "work", ["/srv/app"]]]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(answers, 3);
+  const root = h.view.render();
+  assert.equal(text(find(root, "git-t1")).replace(/\s+/g, " ").trim(), "+120 −8 #42");
+  assert.equal(find(root, "git-work/t1"), null); // clean, and on main
+  assert.match(find(root, "agent-t1").props.tooltip, /Uncommitted: \+120 −8 in 3 files\nPull request #42 · draft\nhttps:\/\/github\.com\/me\/api\/pull\/42/);
+  // Not asked again until due: changes every half minute, pull requests every five.
+  h.view.askGit(() => answers++);
+  assert.equal(h.execs.length, 3);
+  for (const state of h.view.git.values()) state.asked = Date.now() - 31000;
+  h.view.askGit(() => answers++);
+  assert.equal(h.execs.length, 5);
+  assert.deepEqual(background.parsePulls('R 2 {"number":7,"state":"MERGED"}\nR 9 {"number":1}\nR 1 nonsense\n', ["/a", "/b"]), new Map([["/b", { number: 7, state: "merged", url: "" }]]));
 });
