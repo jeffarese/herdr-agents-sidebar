@@ -1273,3 +1273,64 @@ test("a Claude Code session that ended is kept to reopen: its terminal gone from
   assert.deepEqual(h.sharedState["agent-sidebar.closed"], []);
   assert.equal(find(h.view.render(), "closed"), null);
 });
+
+test("Organize asks Claude (Sonnet, low effort) once, shows what it would change, and moves nothing until Apply", async () => {
+  const h = spaced();
+  let asked;
+  h.answer(async (cmd, args, opts) => {
+    asked = { cmd, args, opts };
+    const id = address => args.at(-1).match(new RegExp(`- (s\\d+): "${address}"`))[1];
+    return { code: 0, stderr: "", stdout: JSON.stringify({ structured_output: { machines: [{ machine: "local", spaces: [{ name: "Billing", sessions: [id("Rotate keys"), id("Add retries")] }, { name: "Auth", sessions: [id("Fix login")] }] }] } }) };
+  });
+  let root = h.view.render();
+  find(root, "organize").props.on_click(null, h.cx);
+  assert.equal(h.view.plan, "asking");
+  find(h.view.render(), "organize").props.on_click(null, h.cx); // not asked twice
+  assert.equal(h.execs.length, 1);
+  // Claude Code's print mode on this computer: Sonnet, low effort, no tools, nothing kept.
+  assert.deepEqual([asked.cmd, asked.opts.on, asked.args.slice(3, 14)], ["sh", null, ["-p", "--model", "sonnet", "--effort", "low", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--output-format", "json"]]);
+  assert.match(asked.args.at(-1), /Machine "local"\. Spaces now: "API", "Billing"/);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  root = h.view.render();
+  assert.equal(find(root, "host-agent-list").nodes[0].props.id, "plan");
+  assert.match(text(find(root, "plan")), /Claude suggests Rename API to Auth To Billing: Add retries Apply · moves 1 Dismiss/);
+  assert.deepEqual(h.commands, []);
+  find(root, "plan-apply").props.on_click(null, h.cx);
+  assert.deepEqual(h.commands, [{ name: "space.rename", args: { id: "s1", name: "Auth" } }, { name: "terminal.park", args: { terminal: "t3" } }]);
+  assert.equal(find(h.view.render(), "plan"), null);
+  // Dismiss changes nothing; a new space is named once Herdr shows it.
+  h.answer(async (_cmd, args) => ({ code: 0, stderr: "", stdout: JSON.stringify({ result: JSON.stringify({ machines: [{ machine: "local", spaces: [{ name: "Billing", sessions: [args.at(-1).match(/- (s\d+): "Fix login"/)[1]] }, { name: "Keys", sessions: [args.at(-1).match(/- (s\d+): "Rotate keys"/)[1]] }] }] }) }) }));
+  h.view.pending = [];
+  find(h.view.render(), "organize").props.on_click(null, h.cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  find(h.view.render(), "plan-dismiss").props.on_click(null, h.cx);
+  assert.equal(h.commands.length, 2);
+  find(h.view.render(), "organize").props.on_click(null, h.cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  find(h.view.render(), "plan-apply").props.on_click(null, h.cx);
+  const made = h.view.pending.find(move => move.address === "t2").space;
+  assert.match(made, /^sp[0-9a-f]{32}$/);
+  h.state.panes = h.state.panes.filter(pane => pane.terminal !== "t2");
+  h.view.finishMoves();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(h.hcs.find(args => args[1] === "t2").slice(0, 3), ["label", "t2", `herdr.space=${made}`]);
+  assert.equal(h.notes.length, 0); // one plan, no toast per session
+  h.view.finishMoves();
+  assert.notEqual(h.commands.at(-1).name, "space.rename"); // not shown yet: not named yet
+  h.state.spaces.push({ id: made, name: "1", machine: null, tabs: [] });
+  h.view.finishMoves();
+  assert.deepEqual(h.commands.at(-1), { name: "space.rename", args: { id: made, name: "Keys" } });
+  // No answer: said, and nothing shown.
+  h.answer(async () => ({ code: 1, stderr: "claude: command not found", stdout: "" }));
+  find(h.view.render(), "organize").props.on_click(null, h.cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual([h.view.plan, h.notes.at(-1).title, h.notes.at(-1).body], [null, "Could not organize the sessions", "claude: command not found"]);
+});
+
+test("grouped by space, sessions in one folder get no folder heading", () => {
+  const h = spaced();
+  for (const pane of h.state.panes) pane.cwd = "/Users/me/code/api";
+  assert.deepEqual(ids(h.view.render()).filter(id => id.startsWith("folder-")), []);
+  h.sharedState["agent-sidebar.group"] = "status";
+  assert.ok(ids(h.view.render()).some(id => id.startsWith("folder-")));
+});

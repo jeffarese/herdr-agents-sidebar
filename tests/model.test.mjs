@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, organizeBrief, organizePlan, activityText, tokens, stale, ended, remember, resumeAction, canReply, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -317,4 +317,55 @@ test("a session whose pane closed is held out until Herdr stops listing it, or L
   shown = dropLeaving(rows(), leaving, new Set(), new Set(), LEAVE_MS + 1);
   assert.ok(shown.some(r => r.address === "t3"));
   assert.equal(leaving.size, 0);
+});
+
+test("Claude is shown each machine's spaces and sessions by short ids; its answer becomes renames and moves", () => {
+  const spaces = [{ id: "s1", name: "Claude Code", machine: null, tabs: [{ id: "a1" }] }, { id: "s2", name: "api", machine: null, tabs: [{ id: "b1" }] }, { id: "work/s9", name: "Remote", machine: "work", tabs: [{ id: "work/r1" }] }];
+  const terminals = [terminal("t1", "idle", { title: "Fix login" }), terminal("t2", "idle", { title: "Add retries" }), terminal("t3", "idle", { title: "Watchface colors" }),
+    terminal("t4", "idle", { title: "Tune the bezel" }), terminal("work/t1", "idle", { title: "Deploy" })];
+  const panes = [{ terminal: "t1", pane: "p1", tab: "a1", cwd: "/Users/me/code/api", branch: "main" }, { terminal: "t2", pane: "p2", tab: "b1", cwd: "/Users/me/code/api" },
+    { terminal: "t3", pane: "p3", tab: "a1", cwd: "/Users/me/garmin" }, { terminal: "t4", pane: "p4", tab: "a1", cwd: "/Users/me/garmin" }, { terminal: "work/t1", pane: "work/p1", tab: "work/r1" }];
+  const rows = build(world({ terminals, panes, spaces }));
+  const { prompt, ids } = organizeBrief(rows, spaces);
+  assert.match(prompt, /Machine "local"\. Spaces now: "Claude Code", "api"\. Sessions:/);
+  assert.match(prompt, /- s\d: "Fix login", agent, in ~\/code\/api on main, space "Claude Code"/);
+  assert.match(prompt, /Machine "work"\. Spaces now: "Remote"/);
+  const id = address => [...ids].find(([, a]) => a === address)[0];
+  let made = 0;
+  const plan = organizePlan(rows, spaces, { machines: [
+    { machine: "local", spaces: [{ name: "API", sessions: [id("t1"), id("t2"), "s99"] }, { name: "Garmin", sessions: [id("t3"), id("t4"), id("work/t1")] }] },
+    { machine: "work", spaces: [{ name: "Remote", sessions: [id("work/t1")] }] },
+  ] }, ids, machine => `${machine ? `${machine}/` : ""}spnew${++made}`);
+  // "API" is the space "api"; most of Garmin's sessions are in "Claude Code", which nothing else
+  // wants, so that is renamed; another machine's session and an unknown id are left out.
+  assert.deepEqual(plan.renames, [{ id: "s1", from: "Claude Code", to: "Garmin" }]);
+  assert.deepEqual(plan.moves, [{ address: "t1", title: "Fix login", to: "s2", name: "API", created: false }]);
+  // A space that fits nothing there is new; an answer that makes no sense changes nothing.
+  const fresh = organizePlan(rows, spaces, { machines: [{ machine: "local", spaces: [{ name: "Watch", sessions: [id("t3")] }, { name: "Rest", sessions: [id("t1"), id("t4")] }] }] }, ids, () => "spnew");
+  assert.deepEqual(fresh.moves.map(move => [move.address, move.to, move.created]), [["t3", "spnew", true]]);
+  assert.deepEqual(fresh.renames, [{ id: "s1", from: "Claude Code", to: "Rest" }]);
+  for (const junk of [null, {}, { machines: "x" }, { machines: [{ machine: "local" }, { spaces: [{ name: "", sessions: [id("t1")] }] }] }]) {
+    assert.deepEqual(organizePlan(rows, spaces, junk, ids, () => "spnew"), { renames: [], moves: [] });
+  }
+});
+
+test("small sayings: what a session does or wants, tokens, who can be written to, what is stale, what ended", () => {
+  const row = (status, activity) => ({ status, activity });
+  assert.equal(activityText(row("working", { tool: "Bash", detail: "Run the tests" })), "Bash · Run the tests");
+  assert.equal(activityText(row("blocked", { tool: "Bash", detail: "rm -rf build" })), "Wants Bash · rm -rf build");
+  assert.equal(activityText(row("blocked", { tool: "AskUserQuestion", detail: "Which one?" })), "Asks · Which one?");
+  assert.equal(activityText(row("blocked", { tool: "ExitPlanMode", detail: "" })), "Plan ready");
+  assert.equal(activityText(row("working", null)), "");
+  assert.deepEqual([0, 950, 1000, 159200, 999600, 1240000, NaN].map(tokens), ["", "950", "1k", "159k", "1.0M", "1.2M", ""]);
+  const agent = extra => ({ available: true, kind: "agent", reported: "idle", ...extra });
+  assert.deepEqual([agent(), agent({ reported: "blocked" }), agent({ kind: "shell" }), agent({ inner: true }), agent({ available: false }), null].map(canReply), [true, false, false, false, false, false]);
+  const known = new Map([["t1", { machine: null, session: "a" }], ["work/t1", { machine: "work", session: "b" }], ["t2", { machine: null, session: "c" }]]);
+  assert.deepEqual(ended(known, new Set(["t2"]), new Set([null])).map(seen => seen.session), ["a"]); // "work" doesn't answer: unknown
+  assert.deepEqual([...known.keys()], ["work/t1", "t2"]);
+  const list = Array.from({ length: 9 }, (_, i) => ({ session: `s${i}` })).reduce((closed, seen, i) => remember(closed, seen, i), []);
+  assert.deepEqual([list.length, list[0].session, remember(list, { session: "s5" }, 99)[0].at, remember(list, { session: "s5" }, 99).length], [8, "s8", 99, 8]);
+  const machines = [{ name: null, layout: "ready" }];
+  assert.deepEqual(resumeAction({ session: "abc-1", cwd: "/w", machine: null }, machines, [{ id: "s1", machine: null, active: true }], null),
+    { name: "tab.new", args: { name: undefined, argv: ["claude", "--resume", "abc-1"], folder: "/w", space: "s1" } });
+  assert.equal(resumeAction({ session: "x; rm", machine: null }, machines, [], null), null);
 });

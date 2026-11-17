@@ -400,6 +400,78 @@ export function moveArgs(row, space, tab) {
   return ["label", row.address, `herdr.space=${local(space)}`, `herdr.tab=${tab}`];
 }
 
+// Organizing with Claude: it is shown each machine's spaces and sessions (title, folder, branch,
+// by short ids) and answers with the spaces it would make of them. Nothing else is sent.
+export const ORGANIZE_SYSTEM = "You organize a developer's terminal sessions into named spaces, one set per machine. "
+  + "Put sessions that belong to the same project together: the same repository, or closely related work. "
+  + "Keep an existing space and its name when it already fits; name a new one after its project in one to three words. "
+  + "Prefer a few meaningful spaces to many with one session each, but never mix unrelated projects. "
+  + "Every session goes in exactly one space, on its own machine. Answer only with the structured output.";
+export const ORGANIZE_SCHEMA = { type: "object", required: ["machines"], properties: { machines: { type: "array", items: { type: "object", required: ["machine", "spaces"],
+  properties: { machine: { type: "string" }, spaces: { type: "array", items: { type: "object", required: ["name", "sessions"],
+    properties: { name: { type: "string" }, sessions: { type: "array", items: { type: "string" } } } } } } } } } };
+
+// What Claude is asked, and `ids`: the short id it knows each session by → its address.
+export function organizeBrief(rows, spaces) {
+  const ids = new Map();
+  const lines = [];
+  const machines = [...new Set(rows.filter(row => row.available && !row.inner).map(row => row.machine))];
+  for (const machine of machines) {
+    const names = spaces.filter(space => (space.machine ?? null) === machine).map(space => JSON.stringify(space.name));
+    lines.push(`Machine ${JSON.stringify(machine ?? "local")}. Spaces now: ${names.join(", ") || "none"}. Sessions:`);
+    for (const row of rows.filter(row => row.available && !row.inner && row.machine === machine)) {
+      const id = `s${ids.size + 1}`;
+      ids.set(id, row.address);
+      lines.push(`- ${id}: ${JSON.stringify(row.title.slice(0, 80))}, ${row.kind === "agent" ? "agent" : "shell"}, in ${shortPath(row.cwd) || "?"}${row.branch ? ` on ${row.branch}` : ""}, space ${row.spaceId ? JSON.stringify(row.space) : "none"}`);
+    }
+  }
+  return { prompt: `${lines.join("\n")}\n\nGroup every session into spaces.`, ids };
+}
+
+// What its answer changes: `renames` [{ id, from, to }] and `moves` [{ address, title, to, name,
+// created }], `to` being a space's id. A space it names that exists (whatever the case) is that
+// one; else the space most of those sessions are in already is renamed, if nothing else wants
+// it; else it is a new space, with the id `newId(machine)` makes. Sessions it left out, or put
+// where they are, don't move.
+export function organizePlan(rows, spaces, answer, ids, newId) {
+  const renames = [];
+  const moves = [];
+  const byAddress = new Map(rows.map(row => [row.address, row]));
+  for (const group of Array.isArray(answer?.machines) ? answer.machines : []) {
+    const machine = group?.machine === "local" ? null : group?.machine ?? null;
+    const mine = spaces.filter(space => (space.machine ?? null) === machine);
+    const wanted = (Array.isArray(group?.spaces) ? group.spaces : []).map(space => ({
+      name: String(space?.name ?? "").trim().slice(0, 40),
+      rows: [...new Set(Array.isArray(space?.sessions) ? space.sessions : [])].map(id => byAddress.get(ids.get(id))).filter(row => row && row.machine === machine && !row.inner && row.available),
+    })).filter(space => space.name && space.rows.length);
+    const names = new Set(wanted.map(space => space.name.toLowerCase()));
+    const taken = new Set();
+    const seen = new Set();
+    for (const space of wanted) space.rows = space.rows.filter(row => !seen.has(row.address) && seen.add(row.address));
+    // The larger groups choose first, so the space that is renamed is the one that moves least.
+    for (const space of [...wanted].sort((a, b) => b.rows.length - a.rows.length)) {
+      let target = mine.find(other => other.name.toLowerCase() === space.name.toLowerCase() && !taken.has(other.id));
+      let created = false;
+      if (!target) {
+        const count = new Map();
+        for (const row of space.rows) if (row.spaceId) count.set(row.spaceId, (count.get(row.spaceId) ?? 0) + 1);
+        const [most] = [...count].sort((a, b) => b[1] - a[1])[0] ?? [];
+        const home = mine.find(other => other.id === most && !taken.has(other.id) && !names.has(other.name.toLowerCase()));
+        if (home && count.get(most) * 2 > space.rows.length) {
+          renames.push({ id: home.id, from: home.name, to: space.name });
+          target = home;
+        } else {
+          target = { id: newId(machine), name: space.name };
+          created = true;
+        }
+      }
+      taken.add(target.id);
+      for (const row of space.rows) if (row.spaceId !== target.id) moves.push({ address: row.address, title: row.title, to: target.id, name: space.name, created });
+    }
+  }
+  return { renames, moves };
+}
+
 // A message can be sent to an agent that is not waiting on a dialog: typed into one, it would
 // answer it. Never to a shell, where it would run.
 export const canReply = row => Boolean(row?.available && row.kind === "agent" && !row.inner && row.reported !== "blocked");

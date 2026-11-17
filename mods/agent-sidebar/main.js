@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, canReply, stale, ended, remember, resumeAction, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
 import { PROBE, PROBE_MS, KIND, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
@@ -39,8 +39,14 @@ const SPACE_COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 const MOVE_MS = 8000;
 // Claude Code sessions that ended, newest first, to reopen: { title, cwd, machine, session, at }.
 const CLOSED_KEY = "agent-sidebar.closed";
-// The effort a session runs with, from cool to warm. Not the status colors' yellow.
-const EFFORT_COLOR = { low: "ansi2", medium: "ansi6", high: "ansi4", xhigh: "ansi5", max: "ansi1" };
+// The effort a session runs with, as a scale: the more of it, the warmer. Low is the plain
+// gray of the rest, then blue, green, yellow and red, and the most is also heavier.
+const EFFORT_COLOR = { low: "muted", medium: "ansi4", high: "ansi2", xhigh: "ansi3", max: "ansi1" };
+// Asks Claude (Sonnet, low effort) through Claude Code's own print mode on this computer: no
+// tools, no session kept. PATH as a login would have it: the app's own may lack it.
+const ORGANIZE_SH = 'command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:$PATH"; exec claude "$@" < /dev/null';
+const ORGANIZE_ARGS = ["-p", "--model", "sonnet", "--effort", "low", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--output-format", "json"];
+const NAME_MS = 15000;
 const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
 // Sessions under a folder heading sit this much further in.
 const GROUPED_INDENT = 10;
@@ -83,6 +89,10 @@ export default class AgentSidebar extends View {
     // space is being chosen; `pending`: moves under way; `drag`: a press that may become one.
     this.moving = null;
     this.pending = [];
+    // New spaces a move makes, to name once Herdr shows them: { id, name, at }.
+    this.naming = [];
+    // Claude's suggestion for the spaces: null, "asking", or { renames, moves } to apply.
+    this.plan = null;
     // Sessions parked by a move, until Herdr shows them in their new space: not "leaving".
     this.parked = new Set();
     this.drag = null;
@@ -145,9 +155,9 @@ export default class AgentSidebar extends View {
         this.askKinds(() => wake());
         this.finishMoves();
         // A second, or less when an answer arrives or a move is under way.
-        await Promise.race([cx.sleep(this.pending.length ? 250 : 1000), new Promise(resolve => { wake = resolve; })]);
+        await Promise.race([cx.sleep(this.pending.length || this.naming.length ? 250 : 1000), new Promise(resolve => { wake = resolve; })]);
         // A session held back as leaving comes back if it is still there after LEAVE_MS.
-        if (this.changed || this.leaving.size || this.pending.length) {
+        if (this.changed || this.leaving.size || this.pending.length || this.naming.length) {
           this.changed = false;
           cx.notify();
         }
@@ -264,7 +274,7 @@ export default class AgentSidebar extends View {
       if (key) ys.set(key, y);
       y += heights[i];
     });
-    const view = [this.expanded, this.bySpace, Boolean(this.moving), this.replying, this.width, this.single, compact].join("|");
+    const view = [this.expanded, this.bySpace, Boolean(this.moving), this.replying, typeof this.plan, this.width, this.single, compact].join("|");
     if (this.ys && this.view === view && !compact) {
       for (const [key, now_] of ys) {
         const was = this.ys.get(key);
@@ -324,6 +334,12 @@ export default class AgentSidebar extends View {
   }
 
   finishMoves() {
+    const now_ = Date.now();
+    for (const space of this.naming.slice()) {
+      const shown = spaces().some(other => other.id === space.id);
+      if (shown) run("space.rename", { id: space.id, name: space.name });
+      if (shown || now_ - space.at > NAME_MS) this.naming.splice(this.naming.indexOf(space), 1);
+    }
     if (!this.pending.length) return;
     const placed = new Set(panes().filter(pane => pane.terminal).map(pane => pane.terminal));
     const now = Date.now();
@@ -331,7 +347,7 @@ export default class AgentSidebar extends View {
       const gone = !placed.has(move.address);
       if (!gone && now - move.at < MOVE_MS) continue;
       this.pending.splice(this.pending.indexOf(move), 1);
-      const name = spaces().find(space => space.id === move.space)?.name ?? "the space";
+      const name = move.name ?? spaces().find(space => space.id === move.space)?.name ?? "the space";
       // Still there: nothing was changed. Parked but not labeled: it runs on without a pane,
       // listed here under "No space", where a click peeks at it.
       const failed = body => notify({ title: `Could not move ${move.row.title}`, body, level: "warning" });
@@ -339,7 +355,8 @@ export default class AgentSidebar extends View {
       this.parked.add(move.address);
       hc(moveArgs(move.row, move.space, `tb${hex(32)}`)).then(result => {
         if (result.code !== 0) failed(`It is still running, without a pane: find it under No space. ${String(result.stderr ?? "").trim().slice(0, 120)}`);
-        else notify({ title: `Moved ${move.row.title} to ${name}`, level: "success", timeout: 2500 });
+        else if (!move.quiet) notify({ title: `Moved ${move.row.title} to ${name}`, level: "success", timeout: 2500 });
+        if (result.code === 0 && move.created && !this.naming.some(space => space.id === move.space)) this.naming.push({ id: move.space, name: move.name, at: Date.now() });
       }).catch(() => failed("It is still running, without a pane: find it under No space."));
     }
   }
@@ -416,6 +433,73 @@ export default class AgentSidebar extends View {
         .role("button").accessibility_label(`Forget ${entry.title}`).tooltip("Forget")
         .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => { cx.stop_propagation(); forget(entry); cx.notify(); }).child(glyph("x", 11))))];
+  }
+
+  // Asks Claude how it would arrange the sessions into spaces, and shows what that changes.
+  // Nothing moves until Apply.
+  organize(answered = () => {}) {
+    if (this.plan === "asking") return;
+    const rows = this.rows ?? [];
+    const { prompt, ids } = organizeBrief(rows, spaces());
+    if (!ids.size) return;
+    this.plan = "asking";
+    const failed = why => { this.plan = null; notify({ title: "Could not organize the sessions", body: String(why ?? "").trim().slice(0, 200), level: "warning" }); };
+    exec("sh", ["-c", ORGANIZE_SH, "sh", ...ORGANIZE_ARGS, "--json-schema", JSON.stringify(ORGANIZE_SCHEMA), "--system-prompt", ORGANIZE_SYSTEM, prompt], { on: null, timeout: 120000 }).then(result => {
+      let answer = null;
+      try { const out = JSON.parse(result.stdout); answer = out.structured_output ?? JSON.parse(out.result); } catch { /* said below */ }
+      if (result.code !== 0 || !answer) return failed(result.stderr || "Claude Code gave no answer. Is `claude` installed and signed in on this computer?");
+      const plan = organizePlan(this.rows ?? rows, spaces(), answer, ids, machine => `${machine == null ? "" : `${machine}/`}sp${hex(32)}`);
+      if (plan.renames.length || plan.moves.length) this.plan = plan;
+      else { this.plan = null; notify({ title: "Already organized", body: "Claude would leave every session where it is.", level: "info", timeout: 3000 }); }
+    }).catch(failed).finally(() => { this.changed = true; answered(); });
+  }
+
+  applyPlan() {
+    const plan = this.plan;
+    this.plan = null;
+    if (!plan || plan === "asking") return;
+    for (const rename of plan.renames) run("space.rename", { id: rename.id, name: rename.to });
+    for (const move of plan.moves) {
+      const row = (this.rows ?? []).find(row => row.address === move.address);
+      if (!canMove(row, move.to) || this.pending.some(other => other.address === move.address)) continue;
+      this.pending.push({ address: move.address, row, space: move.to, name: move.name, created: move.created, quiet: true, at: Date.now() });
+      if (row.pane) run("terminal.park", { terminal: move.address });
+    }
+  }
+
+  organizeButton(t) {
+    const asking = this.plan === "asking";
+    const tip = asking ? "Asking Claude…" : "Organize into spaces with Claude (Sonnet, low effort): suggests, then asks";
+    return div().id("organize").size(26).flex_none().rounded(6).flex().items_center().justify_center()
+      .role("button").accessibility_label(tip).cursor_pointer().text_color(asking ? t.accent : t.muted)
+      .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_click((_e, cx) => { this.organize(); cx.notify(); })
+      .child(asking ? glyph("sparkles", 15).loop("opacity", { from: 0.35, to: 1, period: 1200 }) : glyph("sparkles", 15));
+  }
+
+  // What Claude suggests, to apply or dismiss. `height`: what it takes in the list.
+  planPanel(t, plan) {
+    const lines = [
+      ...plan.renames.map(rename => `Rename ${rename.from} to ${rename.to}`),
+      ...[...new Set(plan.moves.map(move => move.to))].map(to => {
+        const group = plan.moves.filter(move => move.to === to);
+        return `${group[0].created ? "New space" : "To"} ${group[0].name}: ${group.map(move => move.title).join(", ")}`;
+      }),
+    ];
+    const shown = lines.slice(0, 7);
+    const button = (id, label, strong, action) => div().id(id).h(20).px(8).flex_none().rounded(5).flex().items_center().text_size(10.5).font_medium()
+      .role("button").accessibility_label(label).cursor_pointer()
+      .text_color(strong ? t.foreground : t.muted).when(strong, el => el.bg(t.selected)).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => { action(); cx.notify(); }).child(label);
+    const node = v_flex().id("plan").flex_none().mx(2).mb(4).p(8).gap(4).rounded(6).bg(t.raised)
+      .child(h_flex().gap(6).items_center().text_size(11).font_medium()
+        .child(glyph("sparkles", 12).text_color(t.accent)).child(div().child("Claude suggests")))
+      .children(shown.map(line => div().min_w(0).truncate().text_size(11).text_color(t.muted).tooltip(line).child(line)))
+      .when(lines.length > shown.length, el => el.child(div().text_size(10.5).text_color(t.dim).child(`+${lines.length - shown.length} more`)))
+      .child(h_flex().gap(6).mt(2).items_center()
+        .child(button("plan-apply", `Apply ${plan.moves.length ? `· moves ${plan.moves.length}` : ""}`.trim(), true, () => this.applyPlan()))
+        .child(button("plan-dismiss", "Dismiss", false, () => { this.plan = null; })));
+    return { node, height: 16 + 18 + shown.length * 20 + (lines.length > shown.length ? 20 : 0) + 26 + 4 };
   }
 
   recolor(space) {
@@ -600,7 +684,8 @@ export default class AgentSidebar extends View {
     return h_flex().id(`uses-${row.address}`).flex_none().gap(3).items_center().text_size(10.5).text_color(t.dim).tooltip(this.usesText(row))
       .when(Boolean(label), el => el.child(div().child(label)))
       .when(Boolean(label && effort), el => el.child(div().child("·")))
-      .when(Boolean(effort), el => el.child(div().id(`effort-${row.address}`).text_color(t[EFFORT_COLOR[effort]] ?? t.muted).child(effort)))
+      .when(Boolean(effort), el => el.child(div().id(`effort-${row.address}`).text_color(t[EFFORT_COLOR[effort]] ?? t.muted)
+        .when(effort === "max", el => el.font_semibold()).child(effort)))
       .when(Boolean(context), el => el.child(div().child("·")).child(div().child(context)));
   }
 
@@ -1002,6 +1087,10 @@ export default class AgentSidebar extends View {
       .child(div().id("moving-cancel").flex_none().px(5).h(18).rounded(4).flex().items_center().text_size(10.5).text_color(t.muted)
         .role("button").accessibility_label("Cancel the move").cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Cancel · Esc")
         .on_click((_e, cx) => { this.moving = null; cx.notify(); }).child("Cancel")), "moving", 28);
+    if (this.plan && this.plan !== "asking" && !compact) {
+      const panel = this.planPanel(t, this.plan);
+      push(panel.node, "plan", panel.height);
+    }
     if (this.single && compact) push(h_flex().h(30).flex_none().justify_center().items_center().child(this.newButton(t, local)));
     const firstAway = sections.findIndex(isAway);
     sections.forEach((group, i) => {
@@ -1022,7 +1111,8 @@ export default class AgentSidebar extends View {
           // A heading only gathers: one session's folder is on its own row. Sessions with no
           // folder known are not a folder. Expanded, every row's second line names its folder, so
           // the sessions still sit together but under no heading.
-          const grouped = open && !this.expanded && Boolean(folder.key) && folder.sessions > 1;
+          // Nor grouped by space: a space is the grouping.
+          const grouped = open && !this.expanded && !this.bySpace && Boolean(folder.key) && folder.sessions > 1;
           if (grouped) push(this.folderHeading(t, group, section, folder), `folder:${group.key}:${section.id}:${folder.key}`, HEIGHT.folder);
           for (const entry of folder.entries) if (open || entry.row.focused) add(entry.row, this.row(t, entry, section.id, now, grouped));
         }
@@ -1083,6 +1173,7 @@ export default class AgentSidebar extends View {
           .child(div().flex_1())
           .when(this.single && this.bySpace, el => el.child(this.newSpaceButton(t, local, 26)))
           .when(this.single, el => el.child(this.newButton(t, local, 26)))
+          .child(this.organizeButton(t))
           .child(this.groupButton(t))
           .child(this.densityButton(t))
           .child(this.settingsButton(t))))
