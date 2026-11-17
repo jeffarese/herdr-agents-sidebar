@@ -7,7 +7,7 @@ on this computer and on your other machines, in one list grouped by machine and 
 needs from you. Agents that finished their turn but left work running stay under Working, and
 Claude Code's sub-agents appear under the session that started them.
 
-![Herdr's sidebar, titled Sessions, with a search field and four filters: All 10, Needs you 1, Working 4, Done 1. Under "This computer · LOCAL": Needs you, "Rotate the API signing keys"; Done, "Fix the flaky checkout test"; Working, "Upgrade the build to Node 22" with a prompt mark for its background shell, "Add retries to the webhook client" with a flag for its goal, and "Migrate the billing schema" with two sub-agents indented under it, "Check the migration on a copy" and "Find every query on invoices"; Pinned, "Tidy the logging setup"; Idle, "Write the release notes" and "zsh · api". Under "studio · REMOTE": Working, "Train the ranking model"; Idle, "Profile the image pipeline". Add machine is at the bottom.](preview.png)
+![Herdr's sidebar, titled Sessions. (This picture is from an earlier version, which had a search field and four filters under the title; they are gone.) Under "This computer · LOCAL": Needs you, "Rotate the API signing keys"; Done, "Fix the flaky checkout test"; Working, "Upgrade the build to Node 22" with a prompt mark for its background shell, "Add retries to the webhook client" with a flag for its goal, and "Migrate the billing schema" with two sub-agents indented under it, "Check the migration on a copy" and "Find every query on invoices"; Pinned, "Tidy the logging setup"; Idle, "Write the release notes" and "zsh · api". Under "studio · REMOTE": Working, "Train the ranking model"; Idle, "Profile the image pipeline". Add machine is at the bottom.](preview.png)
 
 This is an unofficial mod. It is not affiliated with Herdr.
 
@@ -51,11 +51,13 @@ installer. Background work and sub-agents are read from Claude Code (tested with
 | To | Do |
 | --- | --- |
 | Open a session | Click it. Herdr focuses its pane, or peeks at it if it has none. |
-| Find one | Type in the search field: a task, project, program, machine, path or status. Up, Down and Enter pick from the results; Escape clears the search, then returns to the current session. |
-| See only what needs you, works or is done | Click a filter. Click it again for All. |
+| Pick one from the keyboard | With the sidebar focused (`pane.go`), Up and Down move through the sessions and Enter opens the one picked; Escape returns to the current session. |
 | Keep a session near the top | Hover its row and click the pin. A pinned session that has nothing to report sits under Pinned, above the idle ones, and comes first in its section otherwise. |
 | Fold a machine or a section | Click its heading. A folded machine still shows how many sessions need you, work or are done. |
-| See where each session works | Click the lines button beside Settings (or bind a key to `agent-sidebar.density`). Expanded gives each session a second line with its folder and git branch; compact is one line. Every copy of the sidebar follows the choice. |
+| Group sessions by space | Click the layers button in the title bar (or bind a key to `agent-sidebar.group`). Each of Herdr's spaces becomes a heading, in Herdr's order and with the space's color, holding its sessions by urgency; a folded space shows what it holds. Click again for the status sections. Every copy of the sidebar follows the choice. |
+| See which model and effort a session runs with | Expanded, each Claude Code session's second line ends with them, as in `Opus 5.5 · xhigh`; compact, `Opus · xhigh` follows the title when there is room. The tooltip always has them. They are those of the session's last turn. |
+| See the sessions of a machine that is away | A machine Herdr can't reach is one dim line after the others. Click it to show the sessions it had when last seen; they can't be opened until it is back. |
+| See where each session works | Click the lines button beside Settings (or bind a key to `agent-sidebar.density`). Expanded gives each session a second line with its folder and git branch (a folder too long for the line loses its start, not its end); compact is one line. Every copy of the sidebar follows the choice. |
 | Start a shell or an agent on a machine | Click the machine's **+**, pick a folder, then the shell or agent (below). |
 | Start another session where one works | Hover its row and click its **+**: the launcher opens with that folder picked. |
 | Close a session | Hover its row and click **✕**: its pane closes, as ⌘W does in it. One that is working, needs you, has background work or runs a program asks first. |
@@ -144,7 +146,7 @@ and its mark says what it waits on:
 
 Claude Code's sub-agents run inside its process, so Herdr has no terminal for them. The sidebar
 lists each running one under its session, with its task and how long it has run. A click opens
-the session. They count as part of their session in the filters and headings.
+the session. They count as part of their session in the title's count and the headings.
 
 ## How background work is found
 
@@ -156,8 +158,9 @@ own commands there. The script looks at:
   started;
 - **Claude Code's session file** for that process, `~/.claude/sessions/<pid>.json` (or under
   `$CLAUDE_CONFIG_DIR`), which says whether it is busy, waiting on a shell, or idle;
-- **the session's transcript**, for its last goal record only. After the first look it reads
-  only what was added since the last one;
+- **the session's transcript**, for its last goal record and for the model and effort of its
+  last turn, of which only those two words are printed. After the first look it reads only what
+  was added since the last one;
 - **the transcripts of the session's sub-agents** that were written in the last 15 minutes, and
   only while the session is busy or asking you something (always, where there is no session
   file): their description, when they started, and whether they have handed back their report.
@@ -165,6 +168,11 @@ own commands there. The script looks at:
 The script changes nothing. What it prints, including the command lines of the processes under
 your agents, goes only to the Herdr app, over Herdr's own connection to that machine, and stays
 in memory there. The mod makes no network requests.
+
+Once at each start, another script of a few lines asks each machine what it is (`uname`, and
+on a Mac `sysctl hw.model` and `pmset -g batt`; elsewhere the chassis type under `/sys`), so
+its heading can show a laptop, a desktop or a server. The answer, one word, is kept in Herdr's
+shared state. It changes nothing either.
 
 The launcher runs two more short `sh` scripts on the machine it starts on, the same way: one
 lists your project folders (at most once every ten minutes), the other the folders inside a path
@@ -178,7 +186,10 @@ until it is updated. Other agents keep Herdr's status.
 
 ## Known limits
 
-- **Claude Code only** for background work and sub-agents.
+- **Claude Code only** for background work, sub-agents, and model and effort. The model is
+  looked for in the last 1 MB of a transcript on the first look, and in everything added after
+  that. A session whose transcript can't be found (no session file, see below) shows the model
+  it was started with (`claude --model …`), with no effort, or nothing if it was given none.
 - **Machines where Claude Code writes no session file:** background shells are still found, but
   sub-agents and goals only when the agent was started as `claude` with `--session-id <id>`,
   `--resume <id>` or `-r <id>`.

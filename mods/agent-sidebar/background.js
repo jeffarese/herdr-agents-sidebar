@@ -1,8 +1,9 @@
 // Work Herdr's status cannot see: what an agent left running after its turn ended, and the
 // sub-agents running inside it. Read on the agent's own machine from its process tree and
 // from Claude Code's files: the session file (~/.claude/sessions/<pid>.json), the last goal
-// record in the session's transcript, and the transcripts of its sub-agents. Pure, so the
-// sidebar can test it; main.js runs PROBE through Herdr's exec.
+// record in the session's transcript, and the transcripts of its sub-agents. The transcript
+// also says which model and effort the session's last turn ran with. Pure, so the sidebar can
+// test it; main.js runs PROBE through Herdr's exec.
 
 // How often to look while nothing changes. A machine is also looked at within a second of
 // one of its agents changing status, which is when background work starts or ends, except
@@ -17,6 +18,8 @@ const QUIET_MINUTES = 15;
 const FULL_READ_BYTES = 256 * 1024 * 1024;
 // Bytes read again before the last read's end: a goal record (a few KB) still being written.
 const SLACK = 4096;
+// On a first look, the model and effort come from this much of the transcript's end.
+const TURN_TAIL_BYTES = 1024 * 1024;
 
 // POSIX sh. Arguments: the agent terminals' foreground process IDs, then what was read
 // before: <session>=<bytes>@<folder> for a session's transcript (<folder>: its project
@@ -28,6 +31,7 @@ const SLACK = 4096;
 //   G <session> * [<json>]            read in full: its last goal record, if any
 //   G <session> + <json>              the last goal record among bytes added since the last read
 //                                     (no Z line: too much to read in full this time)
+//   E <session> <model> <effort|->    the model and effort of its last turn, when one was read
 //   T <session> <agent> <bytes>       a sub-agent transcript written in the last few minutes
 //   M <agent> <json>                  a new sub-agent's description (its .meta.json)
 //   A <agent> run|done                a changed sub-agent: still going, or handed back
@@ -57,7 +61,18 @@ function remember(  n, list, i, j, k, id) {
     if (k) folder[id] = substr(list[i], k + 1)
   }
 }
-function size_and_path() { size = $1 + 0; path = $0; sub(/^ *[0-9]+ /, "", path) }'
+function size_and_path() { size = $1 + 0; path = $0; sub(/^ *[0-9]+ /, "", path) }
+# "<model> <effort|->" from a finished assistant record of the session itself, else "". Only
+# the two values leave the machine, never the record.
+function turn(s,  m, e) {
+  if (substr(s, length(s)) != "}" || index(s, "\\"isSidechain\\":true")) return ""
+  if (match(s, /"requestedModel":"[][A-Za-z0-9._:@-]+"/)) m = substr(s, RSTART + 18, RLENGTH - 19)
+  else if (match(s, /"message":[{]"model":"[][A-Za-z0-9._:@-]+"/)) m = substr(s, RSTART + 20, RLENGTH - 21)
+  else return ""
+  e = "-"
+  if (match(s, /"perTurnEffort":"[A-Za-z]+"/)) e = substr(s, RSTART + 17, RLENGTH - 18)
+  return m " " e
+}'
 # Before each file read from a byte offset: "==> <offset> <file> <==". Its first line is cut
 # short, unless the read starts at the beginning. One field a line: lines run to MBs.
 skip='BEGIN { FS = "\\n" }
@@ -152,12 +167,19 @@ EOF
   tail -c +"$from" "$path" 2>/dev/null
 done | awk -v mark="$mark" "$lib $skip"'
   index($0, mark) && substr($0, length($0)) == "}" { last[file] = $0 }
-  END { for (f in last) print "G " name(f) " + " last[f] }'
+  index($0, "\\"model\\":\\"") || index($0, "\\"requestedModel\\":\\"") { used = turn($0); if (used != "") ran[file] = used }
+  END { for (f in last) print "G " name(f) " + " last[f]; for (f in ran) print "E " name(f) " " ran[f] }'
 IFS=$nl
 set -f
 [ -n "$full" ] && LC_ALL=C grep -F "$mark" $full /dev/null 2>/dev/null | awk "$lib"'
   { i = index($0, ":{"); last[substr($0, 1, i - 1)] = substr($0, i + 1) }
   END { for (f in last) print "G " name(f) " * " last[f] }'
+# The last turn of each transcript read in full: its end holds it, so only that is read again.
+[ -n "$full" ] && tail -c ${TURN_TAIL_BYTES} $full /dev/null 2>/dev/null | awk "$lib"'
+  BEGIN { FS = "\\n" }
+  /^==> .* <==$/ { file = substr($0, 5, length($0) - 8); next }
+  index($0, "\\"model\\":\\"") || index($0, "\\"requestedModel\\":\\"") { used = turn($0); if (used != "") ran[file] = used }
+  END { for (f in ran) print "E " name(f) " " ran[f] }'
 # The sub-agents of busy sessions that wrote lately, and which of them changed.
 agents=
 [ "$subs" != "$nl" ] && agents=$(find $subs -name 'agent-*.jsonl' -mmin -${QUIET_MINUTES} -exec wc -c {} + 2>/dev/null | awk -v known="$known" "$lib"'
@@ -215,6 +237,25 @@ set -f
 unset IFS
 set +f
 `;
+
+// What kind of machine it is, for its icon. POSIX sh; prints laptop, desktop or server. A Mac
+// with a battery is a laptop, any other a desktop; elsewhere the chassis type decides, and a
+// machine that names none (a virtual one, a container) is a server unless it has a battery.
+export const KIND = `case $(uname -s 2>/dev/null) in
+  Darwin)
+    case $(sysctl -n hw.model 2>/dev/null) in MacBook*) echo laptop; exit 0 ;; esac
+    if pmset -g batt 2>/dev/null | grep -q InternalBattery; then echo laptop; else echo desktop; fi ;;
+  *)
+    case $(cat /sys/class/dmi/id/chassis_type 2>/dev/null) in
+      8|9|10|11|14|30|31|32) echo laptop ;;
+      3|4|5|6|7|13|15|16|35|36) echo desktop ;;
+      17|23|25|28|29) echo server ;;
+      *) if ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then echo laptop; else echo server; fi ;;
+    esac ;;
+esac
+`;
+export const KINDS = ["laptop", "desktop", "server"];
+export const machineKind = output => KINDS.find(kind => kind === String(output ?? "").trim()) ?? null;
 
 // Claude Code runs every Bash command (foreground or background) as
 //   <shell> -c source …/shell-snapshots/snapshot-<shell>-….sh … && eval '<command>' < /dev/null && pwd -P >| …
@@ -276,8 +317,8 @@ export function goalOf(line) {
 const text = (value, n = 200) => typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, n) : "";
 
 // One machine's probe output. `read`: what earlier probes of that machine learned about each
-// transcript, id → { bytes, goal, folder } for a session, { bytes, state, started, meta } for
-// a sub-agent. The result's `read` replaces it, and holds only what this probe saw.
+// transcript, id → { bytes, goal, folder, model, effort } for a session, { bytes, state,
+// started, meta } for a sub-agent. The result's `read` replaces it, and holds only what this probe saw.
 export function parseProbe(output, at = Date.now(), read = new Map()) {
   const procs = new Map();
   const sessions = new Map();
@@ -290,6 +331,7 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
   const states = new Map();
   const starts = new Map();
   const metas = new Map();
+  const turns = new Map();
   for (const line of String(output ?? "").split("\n")) {
     let m;
     if ((m = /^P\s+(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/.exec(line))) {
@@ -304,6 +346,8 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
     } else if ((m = /^G (\S+) ([*+]) ?(.*)$/.exec(line))) {
       if (m[2] === "*") full.add(m[1]);
       if (m[3]) records.set(m[1], m[3]);
+    } else if ((m = /^E (\S+) ([\w.:@[\]-]{1,80}) (-|[A-Za-z]{1,16})$/.exec(line))) {
+      turns.set(m[1], { model: m[2], effort: m[3] === "-" ? null : m[3].toLowerCase() });
     } else if ((m = /^T (\S+) (\S+) (\d+)$/.exec(line))) {
       if (!listed.has(m[1])) listed.set(m[1], new Map());
       listed.get(m[1]).set(m[2], Number(m[3]));
@@ -318,6 +362,7 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
   }
   const next = new Map();
   const goals = new Map();
+  const models = new Map();
   for (const [id, bytes] of sizes) {
     // A record that can't be read says nothing; a full read that found none clears the goal.
     let goal = read.get(id)?.goal ?? null;
@@ -328,7 +373,10 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
       goal = null;
     }
     goals.set(id, goal);
-    next.set(id, { bytes, goal, folder: folders.get(id) ?? null });
+    // Only a turn that was read says which model ran it: until the next one, the last stands.
+    const { model = null, effort = null } = turns.get(id) ?? read.get(id) ?? {};
+    if (model) models.set(id, { model, effort });
+    next.set(id, { bytes, goal, folder: folders.get(id) ?? null, model, effort });
   }
   const subagents = new Map();
   for (const [session, list] of listed) {
@@ -345,7 +393,7 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
     }
     subagents.set(session, running.sort((a, b) => a.started - b.started || a.id.localeCompare(b.id)));
   }
-  return { procs, sessions, logs, goals, subagents, read: next, at };
+  return { procs, sessions, logs, goals, models, subagents, read: next, at };
 }
 
 // The probe's arguments: the foreground process IDs, then what is already read. Only plain
@@ -358,7 +406,15 @@ export function probeArgs(targets, read = new Map()) {
   ];
 }
 
-// address → { at, session, goal, shells, subagents } for the terminals probed on one
+// What a claude command line says it runs with ("claude --model claude-opus-5-5"), or null.
+// Only for a session whose transcript wasn't found: "/model" changes what a transcript says.
+const flag = (args, name) => new RegExp(`\\s--${name}[=\\s]+([\\w.:@[\\]-]{1,80})(?=\\s|$)`).exec(args)?.[1] ?? null;
+export function flagsOf(args) {
+  if (!/^(?:\S*\/)?claude(?:\s|$)/.test(args ?? "") || !flag(args, "model")) return null;
+  return { model: flag(args, "model"), effort: flag(args, "effort")?.toLowerCase() ?? null };
+}
+
+// address → { at, session, goal, model, effort, shells, subagents } for the terminals probed on one
 // machine. targets: [{ address, pid }] with pid the terminal's foreground process: Claude
 // Code itself, or a wrapper that started it. The nearest session under it is the agent's.
 export function workOf(targets, probe) {
@@ -373,8 +429,10 @@ export function workOf(targets, probe) {
   for (const [pid, proc] of probe.procs) {
     const where = place(pid);
     if (!where) continue;
-    const entry = found.get(where.root) ?? { pid: null, depth: Infinity, shells: [] };
+    const entry = found.get(where.root) ?? { pid: null, depth: Infinity, shells: [], flags: null, flagsDepth: Infinity };
     found.set(where.root, entry);
+    const flags = where.depth < entry.flagsDepth ? flagsOf(proc.args) : null;
+    if (flags) Object.assign(entry, { flags, flagsDepth: where.depth });
     if ((probe.sessions.has(pid) || probe.logs.has(pid)) && where.depth < entry.depth) Object.assign(entry, { pid, depth: where.depth });
     // A snapshot shell under another one (below the agent) is that command's own work.
     if (where.depth > 0 && SNAPSHOT.test(proc.args) && !(where.depth > 1 && SNAPSHOT.test(probe.procs.get(proc.parent)?.args ?? ""))) {
@@ -385,10 +443,14 @@ export function workOf(targets, probe) {
   for (const [root, entry] of found) {
     const session = probe.sessions.get(entry.pid);
     const id = probe.logs.get(entry.pid);
+    // The last turn's, when its transcript was read; else what the command line asked for.
+    const ran = (id && probe.models?.get(id)) || entry.flags;
     out.set(roots.get(root), {
       at: probe.at,
       session: session ? { status: typeof session.status === "string" ? session.status : null } : null,
       goal: (id && probe.goals.get(id)) ?? null,
+      model: ran?.model ?? null,
+      effort: ran?.effort ?? null,
       shells: entry.shells.sort((a, b) => a.started - b.started),
       subagents: (id && probe.subagents.get(id)) ?? [],
     });
@@ -411,6 +473,6 @@ export function probeTargets(rows) {
 // What a reading says, without times: redraw only when this changes.
 export function signature(work) {
   return JSON.stringify([...work].sort(([a], [b]) => a.localeCompare(b)).map(([address, info]) =>
-    [address, info.session?.status ?? null, info.goal?.condition ?? null, info.goal?.check ?? null,
+    [address, info.session?.status ?? null, info.goal?.condition ?? null, info.goal?.check ?? null, info.model ?? null, info.effort ?? null,
       info.shells.map(shell => shell.text), info.subagents.map(sub => [sub.id, sub.description])]));
 }

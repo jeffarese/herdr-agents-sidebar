@@ -82,31 +82,32 @@ function find(node, id) {
   return null;
 }
 
-test("search, keyboard selection and Enter target the correct remote agent", () => {
+test("there is no search field and no filters: Up, Down and Enter pick the correct remote agent", () => {
   const h = setup();
-  h.view.render();
-  h.input.text = "remote";
-  h.input.handlers.change(null, h.cx);
-  const root = h.view.render();
-  assert.deepEqual(h.order(), ["work/t1"]);
+  let root = h.view.render();
+  assert.deepEqual(ids(root).filter(id => /search|filter/.test(id)), []);
+  assert.deepEqual(h.order(), ["t1", "work/t1"]);
+  // Enter with nothing picked opens nothing.
+  root.props.on_key_down({ key: "enter" }, h.cx);
+  assert.deepEqual(h.commands, []);
   root.props.on_key_down({ key: "down" }, h.cx);
-  assert.equal(h.scrollTo(), 2); // host heading, then its "Needs you" section heading
-  h.input.handlers.submit();
+  root.props.on_key_down({ key: "down" }, h.cx);
+  assert.equal(h.scrollTo(), 5); // two host headings, two section headings and the local row
+  h.view.render().props.on_key_down({ key: "enter" }, h.cx);
   assert.deepEqual(h.commands, [{ name: "terminal.peek", args: { terminal: "work/t1" } }]);
+  // Escape goes back to the session you are in.
+  h.view.render().props.on_key_down({ key: "escape" }, h.cx);
+  assert.equal(h.view.selected, null);
+  assert.deepEqual(h.commands.at(-1), { name: "terminal.peek", args: { terminal: "t1" } });
 });
 
-test("folding and filtering update the visible navigation order without losing agents", () => {
+test("folding updates the visible navigation order without losing agents", () => {
   const h = setup();
   let root = h.view.render();
   find(root, "host-local").props.on_click(null, h.cx);
   root = h.view.render();
   assert.deepEqual(h.order(), ["work/t1"]);
-  find(root, "filter-blocked").props.on_click(null, h.cx);
-  root = h.view.render();
-  assert.ok(find(root, "agent-work/t1"));
   assert.equal(find(root, "agent-t1"), null);
-  find(root, "filter-all").props.on_click(null, h.cx);
-  root = h.view.render();
   find(root, "host-local").props.on_click(null, h.cx);
   h.view.render();
   assert.deepEqual(h.order(), ["t1", "work/t1"]);
@@ -116,7 +117,11 @@ test("narrow rail can expand and disconnected rows never issue navigation", () =
   const h = setup();
   h.state.machines[1].layout = "unavailable";
   h.view.width = 76;
-  const root = h.view.render();
+  let root = h.view.render();
+  // Its sessions stay out of the rail until its mark is clicked.
+  assert.equal(find(root, "agent-work/t1"), null);
+  find(root, "host-remote:work").props.on_click(null, h.cx);
+  root = h.view.render();
   find(root, "agent-work/t1").props.on_click();
   assert.deepEqual(h.commands, []);
   find(root, "expand-agents").props.on_click();
@@ -133,7 +138,6 @@ test("empty, all statuses, picture icons, parent agents and pin branches render"
   h.state.terminals = [];
   h.view.render();
   assert.equal(h.order().length, 0);
-  h.view.query = "missing";
   assert.doesNotThrow(() => h.view.render());
 });
 
@@ -158,9 +162,12 @@ test("host add buttons stay available in the rail, target the host and do not fo
   assert.deepEqual(h.overlays[0].props, { launcher: true, machine: null });
   find(root, "new-remote:work").props.on_click(null, h.cx);
   assert.deepEqual(h.overlays[1].props, { launcher: true, machine: "work" });
-  h.state.machines[1].layout = "unavailable";
+  // A session can't start on a machine that is connecting; one that is away has no + at all.
+  h.state.machines[1].layout = "loading";
   find(h.view.render(), "new-remote:work").props.on_click(null, h.cx);
   assert.equal(h.overlays.length, 2);
+  h.state.machines[1].layout = "unavailable";
+  assert.equal(find(h.view.render(), "new-remote:work"), null);
 });
 
 test("launcher starts a shell on its host and guards against a disconnect after opening", () => {
@@ -229,10 +236,6 @@ test("folding a section hides its rows from navigation and is remembered by the 
   next.state.focused = h.state.focused;
   next.view.render();
   assert.deepEqual(next.order(), ["t2", "work/t1"]);
-  // Search still reveals rows inside a folded section.
-  next.input.text = "local task";
-  next.input.handlers.change(null, next.cx);
-  assert.ok(find(next.view.render(), "agent-t1"));
 });
 
 test("a folded host summarizes what needs you, works and is done", () => {
@@ -283,27 +286,6 @@ test("agent rows show how long they have been in their state; shells do not", ()
   assert.deepEqual(h.timers, [30000]);
 });
 
-test("search can be cleared by button or Escape, and filters toggle back to All", () => {
-  const h = setup();
-  h.view.render();
-  h.input.text = "remote";
-  h.input.handlers.change(null, h.cx);
-  let root = h.view.render();
-  find(root, "clear-search").props.on_click(null, h.cx);
-  assert.equal(h.view.query, "");
-  h.input.text = "remote";
-  h.input.handlers.change(null, h.cx);
-  root = h.view.render();
-  root.props.on_key_down({ key: "escape" }, h.cx);
-  assert.equal(h.view.query, "");
-  assert.deepEqual(h.commands, []); // the first Escape only clears
-  root = h.view.render();
-  find(root, "filter-done").props.on_click(null, h.cx);
-  assert.equal(h.view.filter, "done");
-  find(h.view.render(), "filter-done").props.on_click(null, h.cx);
-  assert.equal(h.view.filter, "all");
-});
-
 test("no footer: Settings sits in the header and Add machine follows the hosts", () => {
   const h = setup();
   let root = h.view.render();
@@ -313,8 +295,6 @@ test("no footer: Settings sits in the header and Add machine follows the hosts",
   find(root, "settings").props.on_click();
   find(root, "add-machine").props.on_click();
   assert.deepEqual(h.commands, [{ name: "app.settings", args: undefined }, { name: "mod.open", args: { name: "machine-add" } }]);
-  h.view.filter = "blocked";
-  assert.equal(find(h.view.render(), "add-machine"), null); // results only while filtering
 });
 
 test("the rail expands to the width Herdr's sidebar toggle remembered", () => {
@@ -351,8 +331,9 @@ test("an agent waiting on background work sits in Working with a pulsing mark th
   const t2 = find(root, "agent-t2");
   assert.equal(find(t2, "goal-t2").props.tooltip, "Goal: Port the parser");
   assert.ok(glyphs(t2).some(g => /spinner\.svg$/.test(g.props.src)));
-  assert.match(text(find(root, "filter-working")), /Working 2/);
-  assert.match(text(find(root, "filter-done")), /Done 0/);
+  // Both count as working, and neither as done.
+  assert.match(text(find(root, "section-local:working")), /Working 2/);
+  assert.equal(find(root, "section-local:done"), null);
 });
 
 // Lets every pending exec answer and the view take it in.
@@ -448,8 +429,7 @@ test("Claude Code's own sub-agents sit under their session, open it, and count a
   assert.match(sub.props.tooltip, /^Review the repo\nSub-agent, in the background · general-high\nLocal · This computer\nWorking · 3m/);
   assert.match(text(sub), /Review the repo general-high 3m/);
   // Counted as part of its session, and not a terminal for next/previous agent.
-  assert.match(text(find(root, "filter-all")), /All 2/);
-  assert.match(text(find(root, "filter-working")), /Working 1/);
+  assert.equal(text(find(root, "sessions-count")), "2");
   assert.match(text(find(root, "section-local:working")), /Working 1/);
   assert.match(text(find(root, "host-local")), /LOCAL 1/);
   assert.deepEqual(h.order(), ["t1", "work/t1"]);
@@ -459,10 +439,6 @@ test("Claude Code's own sub-agents sit under their session, open it, and count a
   assert.equal(find(root, "pin-t1#a1"), null);
   find(root, "agent-t1#a1").props.on_click();
   assert.deepEqual(h.commands, [{ name: "pane.focus", args: { pane: "p1" } }]);
-  // Search finds sub-agents by their task and by the word.
-  h.input.text = "sub-agent";
-  h.input.handlers.change(null, h.cx);
-  assert.deepEqual(find(h.view.render(), "host-agent-list").nodes.map(n => n.props.id), ["host-local", "section-local:working", "agent-t1#a1"]);
 });
 
 // The launcher behind each +: a folder first, then what to start there.
@@ -774,7 +750,7 @@ test("the expanded view gives each session a second line with its folder and bra
   find(root, "density").props.on_click(null, h.cx);
   assert.equal(h.sharedState["agent-sidebar.density"], "expanded");
   root = h.view.render();
-  assert.equal(find(root, "agent-t1").props.h, 42);
+  assert.equal(find(root, "agent-t1").props.h, 40);
   assert.match(text(find(root, "agent-t1")), /~\/code\/api · fix-login/);
   assert.equal(find(root, "density").props.aria_selected, true);
   // The rail is unchanged: icons only.
@@ -842,7 +818,7 @@ test("a status change fades its new mark in and tints news, once; the first rend
   assert.equal(findStart(root, "tint-t1-"), null);
 });
 
-test("rows that change place slide from the old one, and those they pass make room; a new search does not slide", () => {
+test("rows that change place slide from the old one, and those they pass make room; a new grouping does not slide", () => {
   const h = setup();
   h.state.machines = [{ name: null, layout: "ready" }];
   h.state.focused = null;
@@ -857,11 +833,11 @@ test("rows that change place slide from the old one, and those they pass make ro
   root = h.view.render();
   const second = findStart(root, "slide-row:t2-");
   const first = findStart(root, "slide-row:t1-");
-  // Drawn where it was (section 24 + row 28 + section 24 below its new place), moving up...
-  assert.equal(second.props.top, 24 + 28 + 24 - 24);
+  // Drawn where it was (section 22 + row 28 + section 22 below its new place), moving up...
+  assert.equal(second.props.top, 22 + 28 + 22 - 22);
   assert.ok(find(second, "agent-t2"));
   // ...and the one it passed drawn where it was too, moving down.
-  assert.equal(first.props.top, 24 - (24 + 28 + 24));
+  assert.equal(first.props.top, 22 - (22 + 28 + 22));
   assert.equal(second.props.transition[0], "top");
   assert.equal(findStart(root, "slide-section:local:blocked-").props.opacity, 0);
   root = h.view.render();
@@ -870,9 +846,134 @@ test("rows that change place slide from the old one, and those they pass make ro
   // The new "Needs you" heading fades in where it lands rather than sliding.
   assert.equal(findStart(root, "slide-section:local:blocked-").props.opacity, 1);
   assert.equal(findStart(root, "slide-section:local:blocked-").props.top, undefined);
-  // Typing a search changes the list, not the sessions' places: nothing slides.
-  h.input.text = "second";
-  h.input.handlers.change(null, h.cx);
+  // Grouping by space is another list, not a move: nothing slides.
+  h.state.terminals[1].status = "idle";
+  find(root, "group").props.on_click(null, h.cx);
   root = h.view.render();
   assert.equal(findStart(root, "slide-"), null);
+});
+
+const reading = (model, effort) => ({ at: Date.now(), session: { status: "idle" }, goal: null, shells: [], subagents: [], model, effort });
+
+test("a session says its model and effort in words: on the second line expanded, after the title compact", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "idle", title: "Fix login", program: { name: "Claude", agent: true } },
+    { address: "t2", state: "live", status: "idle", title: "A title long enough to leave no room beside it", program: { name: "Claude", agent: true } },
+    { address: "t3", state: "live", status: "idle", title: "No reading", program: { name: "Claude", agent: true } },
+  ];
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "tb", cwd: "/Users/me/workspace/herdr/herdr-agents", branch: "main" }];
+  h.view.work = new Map([["t1", reading("claude-opus-5-5", "xhigh")], ["t2", reading("claude-fable-5-2", "high")]]);
+  h.view.width = 332;
+  // Compact: family and effort when they fit beside the title, else only in the tooltip.
+  let root = h.view.render();
+  assert.equal(text(find(root, "uses-t1")), "Opus · xhigh");
+  assert.equal(find(root, "uses-t1").props.tooltip, "Opus 5.5 · xhigh effort");
+  assert.equal(find(root, "uses-t2"), null);
+  assert.match(find(root, "agent-t2").props.tooltip, /\nFable 5\.2 · high effort\n/);
+  assert.equal(find(root, "uses-t3"), null);
+  assert.equal(find(root, "agent-t1").props.h, 28); // no taller for it
+  // Expanded: always there, and the folder gives way from its start so the branch stays.
+  h.sharedState["agent-sidebar.density"] = "expanded";
+  root = h.view.render();
+  assert.match(text(find(root, "agent-t1")), /…\/herdr-agents · main Opus · xhigh/);
+  assert.equal(text(find(root, "uses-t2")), "Fable 5.2 · high");
+  assert.equal(find(root, "uses-t3"), null);
+  assert.equal(find(root, "agent-t1").props.h, 40);
+  // Hovering makes room for the row's buttons in compact, not in expanded.
+  h.sharedState["agent-sidebar.density"] = "compact";
+  find(h.view.render(), "agent-t1").props.on_hover(true, h.cx);
+  assert.equal(find(h.view.render(), "uses-t1"), null);
+});
+
+test("a machine that is away is one quiet line after the others, its sessions behind a click", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }, { name: "attic", layout: "unavailable" }, { name: "work", layout: "ready" }];
+  h.state.terminals.push({ address: "attic/t1", state: "live", status: "working", title: "Stale task", program: { name: "Claude", agent: true } });
+  let root = h.view.render();
+  const list = () => find(root, "host-agent-list").nodes.map(n => n.props.id);
+  assert.deepEqual(list(), ["host-local", "section-local:idle", "agent-t1", "host-remote:work", "section-remote:work:blocked", "agent-work/t1", "host-remote:attic", "add-machine"]);
+  const away = find(root, "host-remote:attic");
+  assert.equal(away.props.h, 24);
+  assert.ok(away.props.h < find(root, "host-remote:work").props.h);
+  assert.match(text(away), /attic\s+Unavailable\s+1/);
+  assert.equal(find(root, "new-remote:attic"), null);
+  assert.deepEqual(h.order(), ["t1", "work/t1"]);
+  // A click shows what it had, which still can't be opened; another hides it again.
+  away.props.on_click(null, h.cx);
+  root = h.view.render();
+  assert.equal(list().length, 10); // its section heading and its session, fading in under it
+  assert.ok(find(root, "section-remote:attic:working"));
+  find(root, "agent-attic/t1").props.on_click();
+  assert.deepEqual(h.commands, []);
+  find(root, "host-remote:attic").props.on_click(null, h.cx);
+  root = h.view.render();
+  assert.equal(find(root, "agent-attic/t1"), null);
+  // Back again, it is a host like any other, in its place by name.
+  h.state.machines[1].layout = "ready";
+  root = h.view.render();
+  assert.deepEqual(ids(root).filter(id => /^host-(local|remote)/.test(id)), ["host-local", "host-remote:attic", "host-remote:work"]);
+  assert.ok(find(root, "agent-attic/t1"));
+});
+
+test("grouped by space, each space is a heading with its sessions; every copy follows the choice", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.spaces = [{ id: "s1", name: "API", tabs: [{ id: "a1" }] }, { id: "s2", name: "Billing", tabs: [{ id: "b1" }] }];
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "idle", title: "Fix login", program: { name: "Claude", agent: true } },
+    { address: "t2", state: "live", status: "blocked", title: "Rotate keys", program: { name: "Claude", agent: true } },
+    { address: "t3", state: "live", status: "working", title: "Add retries", program: { name: "Claude", agent: true } },
+  ];
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "a1" }, { pane: "p2", terminal: "t2", tab: "b1" }, { pane: "p3", terminal: "t3", tab: "a1" }];
+  h.sharedState["space.colors"] = { s2: "ansi5" };
+  let root = h.view.render();
+  assert.equal(find(root, "group").props.aria_selected, false);
+  assert.ok(find(root, "section-local:blocked"));
+  find(root, "group").props.on_click(null, h.cx);
+  assert.equal(h.sharedState["agent-sidebar.group"], "space");
+  root = h.view.render();
+  assert.equal(find(root, "group").props.aria_selected, true);
+  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id),
+    ["section-local:space:s1", "agent-t3", "agent-t1", "section-local:space:s2", "agent-t2", "add-machine"]);
+  assert.match(text(find(root, "section-local:space:s1")), /API 2/);
+  // No heading names the status now, so an idle session carries its ring.
+  assert.ok(find(root, "agent-t1").nodes.at(-1).nodes.length > 0);
+  // Folded, a space says what it holds.
+  find(root, "section-local:space:s2").props.on_click(null, h.cx);
+  root = h.view.render();
+  assert.equal(find(root, "agent-t2"), null);
+  assert.deepEqual(find(root, "section-local:space:s2").nodes.map(n => n.props?.tooltip).filter(Boolean), ["1 needs you"]);
+  find(root, "group").props.on_click(null, h.cx);
+  assert.equal(h.sharedState["agent-sidebar.group"], "status");
+  assert.ok(find(h.view.render(), "section-local:blocked"));
+});
+
+test("each reachable machine is asked once what it is, and its heading shows that kind's icon", async () => {
+  const h = setup();
+  h.state.machines.push({ name: "attic", layout: "unavailable" });
+  const icon = id => glyphs(find(h.view.render(), id)).map(g => g.props.src.split("/").pop())[1]; // after the chevron
+  assert.deepEqual([icon("host-local"), icon("host-remote:work")], ["computer.svg", "server.svg"]);
+  h.answer(async (_cmd, args, opts) => ({ code: 0, stdout: args[1] === background.KIND ? (opts.on === "work" ? "desktop\n" : "laptop\n") : "", stderr: "" }));
+  let answers = 0;
+  h.view.askKinds(() => answers++);
+  assert.deepEqual(h.execs.map(([, args, opts]) => [args[1] === background.KIND, opts.on]), [[true, null], [true, "work"]]); // not the one that is away
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(answers, 2);
+  assert.deepEqual(h.sharedState["agent-sidebar.kinds"], { "": "laptop", work: "desktop" });
+  assert.deepEqual([icon("host-local"), icon("host-remote:work")], ["laptop.svg", "computer.svg"]);
+  assert.match(find(h.view.render(), "host-remote:work").props.tooltip, /work · desktop/);
+  // Asked once: not again.
+  h.view.askKinds(() => answers++);
+  assert.equal(h.execs.length, 2);
+  // One that gave no answer keeps its place's icon and is asked again a minute later.
+  const next = setup();
+  next.view.askKinds(() => {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  next.view.askKinds(() => {});
+  assert.equal(next.execs.length, 2);
+  for (const machine of [null, "work"]) next.view.kinds.set(machine, Date.now() - 61000);
+  next.view.askKinds(() => {});
+  assert.equal(next.execs.length, 4);
 });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, matches, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, modelName, fitWhere, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -58,23 +58,59 @@ test("named tabs provide a meaningful fallback when an agent has no task title",
   assert.equal(rows[0].title, "Review API");
 });
 
-test("search combines words across task, host, status and program; filters remain separate", () => {
-  const rows = build(world());
-  const remote = rows.find(r => r.machine);
-  assert.ok(matches(remote, "REMOTE login claude work"));
-  assert.ok(!matches(remote, "local"));
-  assert.ok(!matches(remote, "login", "blocked"));
-  assert.equal(groups(rows, hosts, "local")[0].rows.length, 1);
-  assert.deepEqual(groups(rows, hosts, "no such agent"), []);
-});
-
-test("unavailable hosts remain visible, cannot open stale rows, and never imply a connection", () => {
-  const machines = [{ name: null, layout: "ready" }, { name: "work", layout: "unavailable" }, { name: "studio", layout: "loading" }];
+test("unavailable hosts come last, cannot open stale rows, and never imply a connection", () => {
+  const machines = [{ name: "zeta", layout: "ready" }, { name: "away", layout: "unavailable" }, { name: null, layout: "ready" }, { name: "work", layout: "unavailable" }, { name: "studio", layout: "loading" }];
   const rows = build(world({ machines }));
   assert.equal(openAction(rows.find(r => r.machine)), null);
+  // This computer, the machines that can be reached by name, then the ones that can't.
   assert.deepEqual(groups(rows, machines).map(g => [g.label, g.layout]), [
-    ["This computer", "ready"], ["studio", "loading"], ["work", "unavailable"],
+    ["This computer", "ready"], ["studio", "loading"], ["zeta", "ready"], ["away", "unavailable"], ["work", "unavailable"],
   ]);
+});
+
+test("a model id reads as its family and version, whatever the provider's spelling", () => {
+  assert.deepEqual(["claude-fable-5-2", "claude-opus-4-1-20250805", "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "claude-opus-5-5[1m]", "claude-sonnet-4-5@20250929", "claude-haiku-latest"].map(id => modelName(id).label),
+    ["Fable 5.2", "Opus 4.1", "Sonnet 3.5", "Opus 5.5", "Sonnet 4.5", "Haiku"]);
+  assert.equal(modelName("claude-opus-5-5").family, "Opus");
+  assert.deepEqual(modelName("opus[1m]"), { family: "Opus", label: "Opus" }); // "--model opus"
+  // Another maker's id is shown as it is; no id, nothing.
+  assert.deepEqual(modelName("gpt-5.1-codex"), { family: "gpt-5.1-codex", label: "gpt-5.1-codex" });
+  assert.equal(modelName(""), null);
+  assert.equal(modelName(undefined), null);
+});
+
+test("a session carries the model and effort its machine read, while the reading is fresh", () => {
+  const now = Date.now();
+  const read = at => new Map([["t1", { at, session: { status: "idle" }, goal: null, shells: [], subagents: [], model: "claude-opus-5-5", effort: "xhigh" }]]);
+  const row = work => build(world({ work, now })).find(r => r.address === "t1");
+  assert.deepEqual([row(read(now)).model, row(read(now)).effort, row(read(now)).status], ["claude-opus-5-5", "xhigh", "idle"]);
+  assert.deepEqual([row(read(now - 60000)).model, row(new Map()).effort], [null, null]);
+});
+
+test("a folder too long for its line gives way from its start, keeping its last part and the branch", () => {
+  assert.equal(fitWhere("~/code/app", "main", 40), "~/code/app · main");
+  assert.equal(fitWhere("~/workspace/herdr/herdr-agents", "main", 27), "…/herdr/herdr-agents · main");
+  assert.equal(fitWhere("~/workspace/herdr/herdr-agents", "main", 22), "…/herdr-agents · main");
+  assert.equal(fitWhere("~/workspace/herdr/herdr-agents", "main", 4), "…/herdr-agents · main"); // the last part always stays
+  assert.equal(fitWhere("~", null, 2), "~");
+  assert.equal(fitWhere("", "main", 10), "main");
+});
+
+test("grouped by space, each of Herdr's spaces is a section in Herdr's order, its sessions by urgency", () => {
+  const spaces = [{ id: "s2", name: "Billing", tabs: [{ id: "b1" }] }, { id: "s1", name: "API", tabs: [{ id: "a1" }, { id: "a2" }] }];
+  const terminals = [terminal("t1", "idle"), terminal("t2", "blocked"), terminal("t3", "working"), terminal("t4", "idle"),
+    terminal("t5", "working", { parent: "t1" }), terminal("t6", "idle", { labels: { "herdr.space": "s2" } })];
+  const panes = [{ terminal: "t1", pane: "p1", tab: "a1" }, { terminal: "t2", pane: "p2", tab: "a2" }, { terminal: "t3", pane: "p3", tab: "b1" }];
+  const rows = build(world({ machines: [{ name: null, layout: "ready" }], terminals, panes, spaces }));
+  const sections = sectionize(rows, "space");
+  assert.deepEqual(sections.map(s => [s.id, s.label, s.space, s.entries.map(e => e.row.address)]), [
+    ["space:s2", "Billing", "s2", ["t3", "t6"]],
+    ["space:s1", "API", "s1", ["t2", "t1", "t5"]], // a sub-agent stays under its session
+    ["space:", "No space", null, ["t4"]],
+  ]);
+  assert.deepEqual(groups(rows, [{ name: null, layout: "ready" }], "space")[0].sections.map(s => s.label), ["Billing", "API", "No space"]);
+  // By status is unchanged.
+  assert.deepEqual(sectionize(rows).map(s => s.id), ["blocked", "working", "idle"]);
 });
 
 test("a click focuses a pane using its exact machine-qualified ID or peeks an outside agent", () => {
@@ -94,7 +130,6 @@ test("shell rows use their live folder and preserve explicit names", () => {
   const rows = build(world({ terminals: shells }));
   assert.equal(rows.find(r => r.address === "t1").title, "zsh · project");
   assert.equal(rows.find(r => r.address === "t2").title, "Release console");
-  assert.ok(matches(rows[0], "shell local"));
 });
 
 test("attention, done and running work lead; pins promote; idle shells and programs sort with agents by recency", () => {
@@ -168,9 +203,6 @@ test("an agent whose turn ended stays working while background work it started r
   assert.deepEqual(backgroundLines(row("t2"), now), ["Sub-agents or workflows are running"]);
   assert.deepEqual(backgroundLines(row("t3"), now), ["Goal: Ship the API", "Last check: Tests still fail"]);
   assert.deepEqual(backgroundLines(row("t7"), now), ["A background shell is running"]);
-  assert.ok(matches(row("t1"), "background npm"));
-  assert.ok(matches(row("t3"), "goal api"));
-  assert.ok(!matches(row("t1"), "", "done") && matches(row("t1"), "", "working"));
   assert.deepEqual(sectionize(rows.filter(r => !r.machine)).map(s => [s.id, s.entries.length]), [["done", 2], ["working", 5]]);
 });
 

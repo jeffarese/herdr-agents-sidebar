@@ -32,6 +32,8 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
   const raw = new Map(terminals.map(t => [t.address, t]));
   const spaceByTab = new Map(spaces.flatMap(s => (s.tabs ?? []).map(tab => [tab.id, s])));
   const tabById = new Map(spaces.flatMap(s => (s.tabs ?? []).map(tab => [tab.id, tab])));
+  const spaceById = new Map(spaces.map(s => [s.id, s]));
+  const order = new Map(spaces.map((s, i) => [s.id, i]));
   const addresses = new Set([...listed.keys(), ...placed.keys(), ...terminals.filter(t => t.state === "live").map(t => t.address)]);
   const rows = [];
   for (const address of addresses) {
@@ -43,7 +45,9 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
     if (machine !== null && !hosts.has(machine)) continue;
     const pane = placed.get(address);
     const tab = tabById.get(a?.tab ?? pane?.tab);
-    const space = spaceByTab.get(a?.tab ?? pane?.tab);
+    // A terminal with no pane (one an agent started) still carries its space's label.
+    const label = terminal?.labels?.["herdr.space"];
+    const space = spaceByTab.get(a?.tab ?? pane?.tab) ?? (label ? spaceById.get(label) ?? spaceById.get(`${machine}/${label}`) : undefined);
     const program = terminal?.program ?? pane?.program ?? a?.program;
     const agent = !program?.shell && Boolean(a || program?.agent || terminal?.status || pane?.status);
     const kind = agent ? "agent" : program?.shell || !program ? "shell" : "process";
@@ -57,6 +61,8 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
     rows.push({
       address, machine, title, status, program, kind,
       space: a?.space_name ?? space?.name ?? "",
+      // Which space, and where it comes in Herdr's order, for grouping by space.
+      spaceId: space?.id ?? null, spaceOrder: order.get(space?.id) ?? Infinity,
       pane: a?.pane ?? pane?.pane ?? null,
       parent: terminal?.parent ?? null,
       cwd,
@@ -73,6 +79,8 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
       // Herdr's word, before background work is counted.
       reported: status,
       background: [], goal: null, shells: [], helpers: [],
+      // What its last turn ran with, when its machine could say (background.js).
+      model: null, effort: null,
     });
   }
   const fresh = address => {
@@ -97,10 +105,10 @@ function addSubagents(rows, fresh) {
       rows.push({
         address: `${row.address}#${sub.id}`, machine: row.machine, kind: "agent", inner: true,
         title: sub.description || sub.type || "Sub-agent", status: "working", reported: "working",
-        program: null, space: sub.type, pane: row.pane, terminal: row.address, parent: row.address,
+        program: null, space: sub.type, spaceId: row.spaceId, spaceOrder: row.spaceOrder, pane: row.pane, terminal: row.address, parent: row.address,
         cwd: row.cwd, branch: row.branch, pinned: false, focused: false, changed: sub.started, since: sub.started, seq: 0,
         available: row.available, pid: null, inBackground: sub.background,
-        background: [], goal: null, shells: [], helpers: [],
+        background: [], goal: null, shells: [], helpers: [], model: null, effort: null,
       });
     }
   }
@@ -115,6 +123,8 @@ function holdBackground(rows, fresh) {
     if (row.kind !== "agent" || row.inner) continue;
     const info = fresh(row.address);
     row.goal = info?.goal ?? null;
+    row.model = info?.model ?? null;
+    row.effort = info?.effort ?? null;
     if (!RESTING.has(row.reported)) continue;
     row.shells = info?.shells ?? [];
     const session = info?.session?.status;
@@ -186,14 +196,6 @@ export function backgroundLines(row, now = Date.now()) {
   return lines;
 }
 
-export function matches(row, query, filter = "all") {
-  if (filter !== "all" && row.status !== filter) return false;
-  const text = [row.title, row.space, row.program?.name, row.kind, "terminal session", row.machine ?? "local this computer", row.machine ? "remote" : "", row.address, row.cwd, WORDS[row.status],
-    row.background.length ? "background" : "", row.goal ? `goal ${row.goal.condition}` : "", row.inner ? "sub-agent subagent" : "",
-    ...row.shells.map(shell => shell.text)].join(" ").toLowerCase();
-  return query.toLowerCase().trim().split(/\s+/).every(word => text.includes(word));
-}
-
 // Sections inside each host, in the order of Herdr's own Agents panel (by priority).
 // Pins break ties inside the status sections; a pinned idle session gets its own section.
 // Shells and programs follow the same rules: with nothing to report, they are idle.
@@ -215,7 +217,9 @@ export function sectionOf(row, status = row.status) {
 
 // Rows of one host as sections of {row, depth} entries. Sub-agents sit under their parent
 // when the parent is listed too, and lift the parent into their most urgent section.
-export function sectionize(rows) {
+// `by`: "status" (the sections above), or "space": a section for each of Herdr's spaces, in
+// Herdr's order, its sessions by urgency; one outside any space comes last.
+export function sectionize(rows, by = "status") {
   const listed = new Set(rows.map(row => row.address));
   const kids = new Map();
   for (const row of rows) {
@@ -230,15 +234,28 @@ export function sectionize(rows) {
     return [{ row, depth }, ...(kids.get(row.address) ?? []).flatMap(kid => tree(kid, depth + 1))];
   };
   // Each section holds trees (a session and its sub-agents), in priority order.
+  const spaces = new Map();
   const out = new Map(SECTIONS.map(section => [section.id, []]));
   // Roots first; anything left over (a parent cycle) is listed on its own.
   const roots = rows.filter(row => !row.parent || !listed.has(row.parent) || row.parent === row.address);
   for (const row of [...roots, ...rows]) {
     if (seen.has(row.address)) continue;
     const entries = tree(row, 0);
+    if (by === "space") {
+      const id = `space:${row.spaceId ?? ""}`;
+      if (!spaces.has(id)) spaces.set(id, { id, label: row.spaceId ? row.space || "Space" : "No space", status: null, space: row.spaceId, order: row.spaceOrder, trees: [] });
+      spaces.get(id).trees.push(entries);
+      continue;
+    }
     const top = Math.max(...entries.map((entry, i) => urgency(entry.row, i > 0)));
     const status = Object.keys(URGENT).find(key => URGENT[key] === top) ?? row.status;
     out.get(sectionOf(row, status)).push(entries);
+  }
+  if (by === "space") {
+    return [...spaces.values()].sort((a, b) => a.order - b.order || a.label.localeCompare(b.label)).map(({ trees, order, ...section }) => {
+      const folders = byFolder(trees);
+      return { ...section, folders, entries: folders.flatMap(folder => folder.entries) };
+    });
   }
   return SECTIONS.map(section => {
     const folders = byFolder(out.get(section.id));
@@ -248,6 +265,19 @@ export function sectionize(rows) {
 
 // "/Users/me/code/app" → "~/code/app", on any machine: each has its own home.
 export const shortPath = path => (path ?? "").replace(/^(?:\/(?:Users|home)\/[^/]+|\/root)(?=\/|$)/, "~");
+// An expanded row's second line, in `room` characters: a folder too long for it gives way from
+// its start ("~/code/app" → "…/app"), so its last part and the branch stay.
+export function fitWhere(path, branch, room) {
+  const tail = branch ? ` · ${branch}` : "";
+  if (!path) return branch ?? "";
+  if (path.length + tail.length <= room) return path + tail;
+  const parts = path.split("/");
+  for (let i = 1; i < parts.length; i++) {
+    const cut = `…/${parts.slice(i).join("/")}`;
+    if (cut.length + tail.length <= room || i === parts.length - 1) return cut + tail;
+  }
+  return path + tail;
+}
 const folderKey = path => (path ?? "").replace(/(.)[\\/]+$/, "$1");
 
 // The sessions of one section, by the folder they work in: a folder's sessions sit together
@@ -264,14 +294,16 @@ function byFolder(trees) {
   return [...folders.values()];
 }
 
-export function groups(rows, machines, query = "", filter = "all") {
-  const filtered = rows.filter(row => matches(row, query, filter));
+// Each machine's sessions. This computer first, then the machines that can be reached, by name,
+// then the ones that can't: those have nothing to act on, so they wait at the end.
+export function groups(rows, machines, by = "status") {
   const hosts = [...machines];
   if (!hosts.some(m => m.name == null)) hosts.push({ name: null, layout: "loading" });
-  hosts.sort((a, b) => a.name == null ? (b.name == null ? 0 : -1) : b.name == null ? 1 : a.name.localeCompare(b.name));
+  const rank = host => host.name == null ? 0 : host.layout === "unavailable" ? 2 : 1;
+  hosts.sort((a, b) => rank(a) - rank(b) || (a.name ?? "").localeCompare(b.name ?? ""));
   return hosts.map(host => {
-    const mine = filtered.filter(row => row.machine === (host.name ?? null));
-    const sections = sectionize(mine);
+    const mine = rows.filter(row => row.machine === (host.name ?? null));
+    const sections = sectionize(mine, by);
     return {
       ...host, key: host.name == null ? "local" : `remote:${host.name}`,
       label: host.name ?? "This computer", remote: host.name != null,
@@ -279,7 +311,23 @@ export function groups(rows, machines, query = "", filter = "all") {
       // Display order: section by section, sub-agents under their parents.
       rows: sections.flatMap(section => section.entries.map(entry => entry.row)),
     };
-  }).filter(group => !query.trim() && filter === "all" || group.rows.length);
+  });
+}
+
+// A model id as people say it: "claude-opus-4-1-20250805" → { family: "Opus", label: "Opus 4.1" },
+// "us.anthropic.claude-3-5-sonnet-20241022-v2:0" → Sonnet 3.5. Read from the id's own words, so
+// a model this was never told about still gets its name. Null when there is no id.
+export function modelName(id) {
+  if (typeof id !== "string" || !id.trim()) return null;
+  const words = id.trim().replace(/\[[^\]]*\]$/, "").replace(/^.*claude-/i, "").replace(/@.*$/, "").replace(/-v\d+(?::\d+)?$/i, "")
+    .split("-").filter(word => word && word !== "latest" && !/^\d{6,}$/.test(word));
+  const name = words.find(word => /^[a-z]+$/i.test(word));
+  // "--model opus": an alias is the family's name already.
+  const known = /claude-/i.test(id) || /^(?:fable|mythos|opus|sonnet|haiku)$/i.test(words.join("-"));
+  if (!name || !known) return { family: id.trim().slice(0, 24), label: id.trim().slice(0, 24) };
+  const family = name[0].toUpperCase() + name.slice(1).toLowerCase();
+  const version = words.filter(word => /^\d{1,2}$/.test(word)).join(".");
+  return { family, label: version ? `${family} ${version}` : family };
 }
 
 // Compact age, as Herdr's Agents panel shows it: <1m, 4m, 2h, 3d.

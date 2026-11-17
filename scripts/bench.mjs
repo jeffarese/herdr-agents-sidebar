@@ -56,9 +56,9 @@ for (const n of [20, 100, 500]) {
   }]));
   const machines = [{ name: null, layout: "ready" }, { name: "studio", layout: "ready" }, { name: "build", layout: "ready" }];
   const input = { terminals: list, machines, work, now };
-  const once = () => groups(build(input), machines, "", "all");
-  const search = () => groups(build(input), machines, "task 4", "all");
-  console.log(`  ${String(n).padStart(3)} terminals   build+group ${ms(time(once, 200))}   with a search ${ms(time(search, 200))}`);
+  const once = () => groups(build(input), machines);
+  const bySpace = () => groups(build(input), machines, "space");
+  console.log(`  ${String(n).padStart(3)} terminals   build+group ${ms(time(once, 200))}   by space ${ms(time(bySpace, 200))}`);
 }
 
 // --- Parsing a probe's output ------------------------------------------------------------

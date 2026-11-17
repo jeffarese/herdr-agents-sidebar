@@ -4,10 +4,13 @@ import { spawn, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROBE, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
+import { PROBE, KIND, machineKind, flagsOf, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
 
 // As ps prints a background command Claude Code started (captured from Claude Code 2.1.323).
 const snapshot = command => `/bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1794566139050-qx5w1i.sh 2>/dev/null || true && \\builtin setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval '${command.replaceAll("'", `'"'"'`)}' < /dev/null && pwd -P >| /tmp/claude-151a-cwd`;
+// An assistant record of the session itself, as Claude Code 2.1.326 writes it: the model and
+// effort follow the message. A tool call's own input may hold the same keys.
+const turn = (model, effort, input = {}) => JSON.stringify({ parentUuid: "a", isSidechain: false, message: { model, role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Agent", input }] }, requestedModel: model, type: "assistant", ...(effort ? { effort, perTurnEffort: effort } : {}) });
 const goal = fields => JSON.stringify({ parentUuid: "a", isSidechain: false, type: "attachment", attachment: { type: "goal_status", ...fields } });
 // Records of a sub-agent's transcript, as Claude Code 2.1.323 writes them.
 const prompt = (text, timestamp) => JSON.stringify({ parentUuid: null, isSidechain: true, agentId: "x", type: "user", message: { role: "user", content: text }, timestamp });
@@ -105,7 +108,7 @@ test("a wrapper's Claude Code session is found, and only its background shells c
   assert.deepEqual(work.get("t1").session, { status: "busy" });
   assert.deepEqual(work.get("t1").shells, [{ text: "npm test", started: now - 240000 }, { text: "sleep 300", started: now - 30000 }]);
   assert.deepEqual(work.get("t1").subagents.map(sub => sub.id), ["a1"]);
-  assert.deepEqual(work.get("t2"), { at: now, session: null, goal: null, shells: [], subagents: [] });
+  assert.deepEqual(work.get("t2"), { at: now, session: null, goal: null, model: null, effort: null, shells: [], subagents: [] });
   assert.equal(work.has("t3"), false); // its process is gone
   // A reading's signature ignores times.
   assert.equal(signature(work), signature(workOf([{ address: "t1", pid: 900 }, { address: "t2", pid: 950 }], parseProbe("P 900 1 00:01 agp\nP 950 1 00:01 claude\nP 901 900 00:01 claude\n" +
@@ -143,7 +146,7 @@ for (const [shell, ...flags] of shells) {
     const log = join(project, "abc-123.jsonl");
     const record = goal({ met: false, sentinel: true, condition: "Ship it" });
     const pad = n => `${JSON.stringify({ type: "user", text: "x".repeat(n - 25) })}\n`; // n + 1 bytes
-    writeFileSync(log, `${pad(9000)}${record}\n${pad(4096 + 20 - record.length - 2)}`);
+    writeFileSync(log, `${turn("claude-opus-5-5", "xhigh", { model: "haiku", effort: "low" })}\n${pad(9000 - 400)}${pad(399 - turn("claude-opus-5-5", "xhigh", { model: "haiku", effort: "low" }).length - 1)}${record}\n${pad(4096 + 20 - record.length - 2)}`);
     // One sub-agent still working, one that handed its report back.
     writeFileSync(join(subagents, "agent-a1.jsonl"), [prompt("Review the repo", "2026-11-13T11:14:14.969Z"), call("Read"), result("ok"), ""].join("\n"));
     writeFileSync(join(subagents, "agent-a1.meta.json"), JSON.stringify({ agentType: "general-high", description: "Review the repo", requestShape: "background" }));
@@ -166,6 +169,8 @@ for (const [shell, ...flags] of shells) {
     assert.deepEqual(work.session, { status: "busy" });
     assert.deepEqual(work.shells.map(shell => shell.text), ["sleep 30"]);
     assert.deepEqual(work.goal, { condition: "Ship it", check: "" });
+    // The session's own model and effort, not the ones a tool call asked for.
+    assert.deepEqual([work.model, work.effort], ["claude-opus-5-5", "xhigh"]);
     assert.deepEqual(work.subagents, [{ id: "a1", type: "general-high", description: "Review the repo", background: true, started: Date.parse("2026-11-13T11:14:14.969Z") }]);
     // The same session open in a second process (resumed twice): read once, listed once.
     const child = [...probe.procs.values()].find(proc => proc.parent === String(agent.pid));
@@ -180,6 +185,11 @@ for (const [shell, ...flags] of shells) {
     assert.ok(probeArgs([], probe.read).includes(`abc-123=${probe.read.get("abc-123").bytes}@-work-app`));
     const grown = run(probe.read);
     assert.deepEqual(grown.goals.get("abc-123"), { condition: "Ship it", check: "" });
+    // No new turn: the model stands. A turn after "/model" replaces it; one cut short doesn't.
+    assert.deepEqual(grown.models.get("abc-123"), { model: "claude-opus-5-5", effort: "xhigh" });
+    appendFileSync(log, `${turn("claude-fable-5-2", "high")}\n${turn("claude-haiku-5-5", "low").slice(0, -30)}`);
+    assert.deepEqual(run(grown.read).models.get("abc-123"), { model: "claude-fable-5-2", effort: "high" });
+    appendFileSync(log, "\n");
     // "/goal clear" appends a met sentinel, found in the new bytes. The sub-agent finishes.
     appendFileSync(log, `${goal({ met: true, sentinel: true, condition: "Ship it" })}\n`);
     appendFileSync(join(subagents, "agent-a1.jsonl"), `${call("SubagentHandback")}\n`);
@@ -223,4 +233,35 @@ test("a transcript that grows while it is read loses no goal record", { skip: !e
   assert.equal(probe.goals.get("abc-123"), null);
   rmSync(join(home, "grow"));
   assert.equal(run(probe.read).goals.get("abc-123"), null);
+});
+
+test("what the probe read of a session's last turn is kept until a newer turn is read", () => {
+  const first = parseProbe("Z s1 500\nZ s2 900\nE s1 claude-opus-5-5 xhigh\nE s2 claude-sonnet-4-5[1m] -\nE s3 rm$(x) high\n");
+  assert.deepEqual(first.models.get("s1"), { model: "claude-opus-5-5", effort: "xhigh" });
+  assert.deepEqual(first.models.get("s2"), { model: "claude-sonnet-4-5[1m]", effort: null });
+  assert.equal(first.models.has("s3"), false);
+  const second = parseProbe("Z s1 500\nZ s2 950\nE s2 claude-fable-5-2 high\n", Date.now(), first.read);
+  assert.deepEqual(second.models.get("s1"), { model: "claude-opus-5-5", effort: "xhigh" });
+  assert.deepEqual(second.models.get("s2"), { model: "claude-fable-5-2", effort: "high" });
+  // A change of model or effort is news: the sidebar redraws.
+  const work = probe => new Map([["t1", { at: 1, session: null, goal: null, shells: [], subagents: [], ...probe.models.get("s2") }]]);
+  assert.notEqual(signature(work(first)), signature(work(second)));
+});
+
+test("a machine says what kind it is; anything else is no answer", { skip: !existsSync("/bin/sh") }, () => {
+  assert.deepEqual(["laptop\n", " desktop ", "server", "toaster", "", undefined].map(machineKind), ["laptop", "desktop", "server", null, null, null]);
+  assert.ok(machineKind(execFileSync("/bin/sh", ["-c", KIND], { encoding: "utf8" })));
+});
+
+test("a session with no transcript to read takes its model from its command line", () => {
+  assert.deepEqual(flagsOf("claude --model claude-opus-5-5"), { model: "claude-opus-5-5", effort: null });
+  assert.deepEqual(flagsOf("/Users/me/.local/bin/claude --effort XHIGH --model=opus[1m] --resume abc"), { model: "opus[1m]", effort: "xhigh" });
+  for (const args of ["claude", "claude --resume abc", "node server.js --model claude-opus-5-5", "claude --model $(rm)", "", undefined]) assert.equal(flagsOf(args), null);
+  // No session file and no id on the command line (as on some machines): the flag is all there is.
+  const bare = parseProbe("P 10 1 05:00 claude --model claude-opus-5-5\nP 20 1 05:00 /bin/zsh\nP 21 20 04:00 claude --model claude-haiku-5-5\n", 1000000);
+  const work = workOf([{ address: "t1", pid: 10 }, { address: "t2", pid: 20 }], bare);
+  assert.deepEqual([work.get("t1").model, work.get("t1").effort, work.get("t2").model], ["claude-opus-5-5", null, "claude-haiku-5-5"]);
+  // A transcript that was read wins: "/model" changes it, not the command line.
+  const read = parseProbe("P 10 1 05:00 claude --model claude-opus-5-5\nL 10 s1\nZ s1 500\nE s1 claude-fable-5-2 high\n", 1000000);
+  assert.deepEqual([workOf([{ address: "t1", pid: 10 }], read).get("t1").model, workOf([{ address: "t1", pid: 10 }], read).get("t1").effort], ["claude-fable-5-2", "high"]);
 });

@@ -1,18 +1,18 @@
 import { View, div, svg, image } from "gpui-kit";
-import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
+import { h_flex, v_flex, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
-import { PROBE, PROBE_MS, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { PROBE, PROBE_MS, KIND, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
 const ART = "mods/agent-sidebar/";
 const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
 const hostState = host => host.layout === "ready" ? "" : host.layout === "loading" ? "Connecting…" : "Unavailable";
+// A machine that can't be reached: one quiet line after the others, its sessions behind a click.
+const isAway = host => host.remote && host.layout === "unavailable";
 // Below this width the sidebar is a rail of icons.
 const RAIL = 210;
 const WIDE = 320;
-const FILTERS = [["all", "All"], ["blocked", "Needs you"], ["working", "Working"], ["done", "Done"]];
-const EMPTY = { blocked: "Nothing needs you", working: "Nothing is working", done: "Nothing finished yet" };
 // The mark of an agent whose turn ended but whose work goes on, by its first reason.
 const HOLD = { shell: "terminal", agents: "agent", goal: "goal" };
 // The ✕ stays armed this long after its first click; a second click sooner than a double
@@ -24,7 +24,15 @@ const PROBE_GAP_MS = 1000;
 // "compact": one line per session; "expanded": two, the second saying where it works. The
 // person's choice, so every copy (and layout) shows the same.
 const DENSITY_KEY = "agent-sidebar.density";
-const ROW = { compact: 28, expanded: 42 };
+const ROW = { compact: 28, expanded: 40 };
+// "status": sections by what each session is doing; "space": a section for each of Herdr's
+// spaces. The person's choice too.
+const GROUP_KEY = "agent-sidebar.group";
+// What kind of machine each one is ("" for this computer), for its icon: asked once a start,
+// and kept so the next start shows it at once.
+const KINDS_KEY = "agent-sidebar.kinds";
+const KIND_ICON = { laptop: "laptop", desktop: "computer", server: "server" };
+const KIND_RETRY_MS = 60000;
 // Sessions under a folder heading sit this much further in.
 const GROUPED_INDENT = 10;
 // A status change: the new mark fades and slides in; news that wants you (Needs you, Done)
@@ -38,7 +46,10 @@ const SLIDE = { duration: 300, easing: "ease-out" };
 // Something new in a list that was already shown fades in where it lands.
 const ENTER = { duration: 240, easing: "ease-out" };
 const SLIDE_MS = 700;
-const HEIGHT = { section: 24, folder: 20, empty: 31 };
+const HEIGHT = { host: 30, hostState: 10, hostGap: 6, away: 24, section: 22, folder: 20, empty: 29 };
+// A host heading and the space above it.
+const hostHeight = (group, first, firstAway) => isAway(group) ? HEIGHT.away + (firstAway && !first ? HEIGHT.hostGap : 0)
+  : HEIGHT.host + (hostState(group) ? HEIGHT.hostState : 0) + (first ? 0 : HEIGHT.hostGap);
 const NEWS = new Set(["blocked", "done"]);
 // Per-copy conveniences only (folded hosts and sections). Storage can be missing or throw.
 const store = {
@@ -52,13 +63,13 @@ export default class AgentSidebar extends View {
     const initial = props() ?? {};
     this.launcher = Boolean(initial.launcher);
     if (this.launcher) { initLauncher(this, initial, cx); return; }
-    this.query = "";
-    this.filter = "all";
     this.selected = null;
     this.hovered = null;
     this.width = Infinity;
     // Host keys ("local", "remote:work") and section keys ("local:idle").
     this.folded = new Set(store.get("folded", []));
+    // Unreachable hosts whose sessions were asked for. Not kept: once back, a host is as it was.
+    this.revealed = new Set();
     // address → the status each row was shown with, and the changes still animating.
     this.shown = null;
     this.fresh = new Map();
@@ -79,23 +90,16 @@ export default class AgentSidebar extends View {
     });
     this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new();
-    this.input = InputState.new({ placeholder: "Search sessions or hosts…" });
-    this.input.on("change", (_e, cx) => {
-      this.query = this.input.value();
-      this.selected = null;
-      this.scroll.scroll_to_item(0);
-      cx.notify();
-    });
-    this.input.on("submit", () => this.open(this.visible.find(r => r.address === this.selected) ?? this.visible[0]));
-    // "focus" from pane.go; "new" (bind a key to agent-sidebar.new) opens the launcher for the
+    // "focus" from pane.go (Up, Down and Enter then pick a session); "new" (bind a key to agent-sidebar.new) opens the launcher for the
     // focused machine; "browse" comes from the launcher, which closes for the system's picker.
     cx.spawn(async cx => {
       for (;;) {
         const command = await nextCommand();
-        if (command === "focus") this.input.focus();
+        if (command === "focus") this.handle.focus();
         else if (command === "new") this.launch(spaces().find(space => space.id === focused()?.space)?.machine ?? null, {}, "dialog");
         else if (command === "browse") this.browse();
         else if (command === "density") this.toggleDensity();
+        else if (command === "group") this.toggleGroup();
         cx.notify();
       }
     });
@@ -109,10 +113,12 @@ export default class AgentSidebar extends View {
     this.asked = new Map(); // machine → when it was last asked
     this.asking = new Set(); // machines whose answer is on its way
     this.stale = new Set(); // machines to ask again as soon as allowed
+    this.kinds = new Map(); // machine → true once it said what it is, else when it was asked
     cx.spawn(async cx => {
       let wake = () => {};
       for (;;) {
         this.probe(() => wake());
+        this.askKinds(() => wake());
         // A second, or less when an answer arrives.
         await Promise.race([cx.sleep(1000), new Promise(resolve => { wake = resolve; })]);
         // A session held back as leaving comes back if it is still there after LEAVE_MS.
@@ -162,6 +168,27 @@ export default class AgentSidebar extends View {
     if (signature(this.work) !== before) this.changed = true;
   }
 
+  // Asks each reachable machine once what it is (background.js KIND). One that can't say is
+  // asked again a minute later, and keeps the icon of its place (this computer, or a remote).
+  askKinds(answered) {
+    const now = Date.now();
+    for (const host of machines()) {
+      const name = host.name ?? null;
+      const asked = this.kinds.get(name);
+      if (host.layout !== "ready" || asked === true || now - (asked ?? 0) < KIND_RETRY_MS) continue;
+      this.kinds.set(name, now);
+      exec("sh", ["-c", KIND], { on: name, timeout: 10000 }).then(result => {
+        const kind = result.code === 0 ? machineKind(result.stdout) : null;
+        if (!kind) return;
+        this.kinds.set(name, true);
+        if (shared(KINDS_KEY)?.[name ?? ""] === kind) return;
+        setShared(KINDS_KEY, { ...shared(KINDS_KEY), [name ?? ""]: kind });
+        this.changed = true;
+        answered();
+      }).catch(() => { /* asked again later */ });
+    }
+  }
+
   // The launcher: a folder, then a shell or an agent to start there. At the pointer from a +,
   // centered from the keyboard. `extra`: { folder, tag } to start from.
   launch(machine, extra = {}, kind = "popup") {
@@ -203,7 +230,7 @@ export default class AgentSidebar extends View {
 
   // Rows and headings whose place changed since the last render slide there from the old one:
   // drawn at the old place now, at the new one a frame later, with a transition between. Not
-  // when the view itself changed (search, filter, width, density): that is a new list, not a move.
+  // when the view itself changed (width, density): that is a new list, not a move.
   slide(t, children, keys, heights, compact, now) {
     for (const [key, move] of this.moves) if (now - move.at > SLIDE_MS) this.moves.delete(key);
     const ys = new Map();
@@ -212,7 +239,7 @@ export default class AgentSidebar extends View {
       if (key) ys.set(key, y);
       y += heights[i];
     });
-    const view = [this.query, this.filter, this.expanded, this.width, this.single, compact].join("|");
+    const view = [this.expanded, this.bySpace, this.width, this.single, compact].join("|");
     if (this.ys && this.view === view && !compact) {
       for (const [key, now_] of ys) {
         const was = this.ys.get(key);
@@ -250,6 +277,21 @@ export default class AgentSidebar extends View {
       .child(glyph("rows", 15));
   }
 
+  toggleGroup() {
+    setShared(GROUP_KEY, shared(GROUP_KEY) === "space" ? "status" : "space");
+  }
+
+  groupButton(t) {
+    const on = this.bySpace;
+    const tip = on ? "Group by status" : "Group by space";
+    return div().id("group").size(26).flex_none().rounded(6).flex().items_center().justify_center()
+      .role("button").aria_selected(on).accessibility_label(tip)
+      .cursor_pointer().text_color(on ? t.foreground : t.muted).when(on, el => el.bg(t.selected))
+      .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_click((_e, cx) => { this.toggleGroup(); cx.notify(); })
+      .child(glyph("spaces", 15));
+  }
+
   // Sessions of one status working in the same folder, when there are several.
   folderHeading(t, group, section, folder) {
     return h_flex().id(`folder-${group.key}:${section.id}:${folder.key}`).h(20).flex_none().pl(12).pr(8).gap(5).items_center()
@@ -266,23 +308,13 @@ export default class AgentSidebar extends View {
     cx.notify();
   }
 
-  // Search and filters reveal everything they match, even inside folded hosts and sections.
   isOpen(key) {
-    return !this.folded.has(key) || Boolean(this.query.trim()) || this.filter !== "all";
+    return !this.folded.has(key);
   }
 
-  chooseFilter(filter, cx) {
-    this.filter = this.filter === filter && filter !== "all" ? "all" : filter;
-    this.selected = null;
-    this.scroll.scroll_to_item(0);
-    cx.notify();
-  }
-
-  clearSearch(cx) {
-    this.input.set_value("");
-    this.query = "";
-    this.selected = null;
-    cx.notify();
+  // An unreachable host is closed until asked for; any other is open until folded.
+  hostOpen(group) {
+    return isAway(group) ? this.revealed.has(group.key) : this.isOpen(group.key);
   }
 
   // Back from the rail to the width Herdr's own sidebar toggle remembered.
@@ -293,13 +325,13 @@ export default class AgentSidebar extends View {
 
   // Settings and Add machine live here, so the sidebar needs no footer.
   extras(t, compact) {
-    const add = h_flex().id("add-machine").h(28).flex_none().rounded(6).items_center().gap(8)
+    const add = h_flex().id("add-machine").h(26).flex_none().rounded(6).items_center().gap(8)
       .role("button").accessibility_label("Add machine").tooltip("Connect another machine")
       .cursor_pointer().text_size(11.5).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_click(() => run("mod.open", { name: "machine-add" }))
       .child(glyph("plus", 13));
     return compact ? [add.mt(6).justify_center(), this.settingsButton(t).mx_auto()]
-      : [add.mt(10).px(8).child("Add machine")];
+      : [add.mt(6).px(8).child("Add machine")];
   }
 
   settingsButton(t) {
@@ -353,7 +385,24 @@ export default class AgentSidebar extends View {
       : row.background.some(reason => reason !== "goal") ? "Working in the background" : "Goal active";
     const state = !row.available ? "Unavailable" : row.kind === "agent" && row.since ? `${word} · ${duration(now - row.since)}` : word;
     const from = !row.parent ? "" : row.inner ? `Inside ${row.parent}` : `Started from ${row.parent}`;
-    return [row.title, context, host, state, ...backgroundLines(row, now), row.inner ? "" : row.address, row.cwd, from].filter(Boolean).join("\n");
+    return [row.title, context, host, state, this.usesText(row), ...backgroundLines(row, now), row.inner ? "" : row.address, row.cwd, from].filter(Boolean).join("\n");
+  }
+
+  // "Opus 5.5 · xhigh effort": what the session's last turn ran with, when its machine said.
+  usesText(row) {
+    const name = modelName(row.model);
+    return name ? [name.label, row.effort ? `${row.effort} effort` : ""].filter(Boolean).join(" · ") : "";
+  }
+
+  // The same, at a glance, in words: `label` is the model's name, or none where there is no
+  // room for it. The effort is the brighter of the two: it is what differs between sessions.
+  uses(t, row, label) {
+    const effort = row.effort ?? "";
+    if (!label && !effort) return null;
+    return h_flex().id(`uses-${row.address}`).flex_none().gap(3).items_center().text_size(10.5).text_color(t.dim).tooltip(this.usesText(row))
+      .when(Boolean(label), el => el.child(div().child(label)))
+      .when(Boolean(label && effort), el => el.child(div().child("·")))
+      .when(Boolean(effort), el => el.child(div().text_color(t.muted).child(effort)));
   }
 
   // `grouped`: under a folder heading, which already says where it works.
@@ -372,10 +421,31 @@ export default class AgentSidebar extends View {
     // size, after icon, age and mark.
     const folder = row.inner ? row.space : row.cwd ? (shortPath(row.cwd) === "~" ? "~" : row.cwd.replace(/[\\/]+$/, "").split(/[\\/]/).pop()) : "";
     const indent = 8 + depth * 14 + (grouped ? GROUPED_INDENT : 0);
-    const room = Math.floor(((Number.isFinite(this.width) ? this.width : WIDE) - 104 - indent) / 6.5);
+    // Its model and effort, in words. Expanded, on the second line, always: the name in full
+    // ("Opus 5.5") where the folder leaves room, else its family, and a folder too long for what
+    // is left gives way from its start. Compact, after the title when both fit, else the effort
+    // alone, else only in the tooltip; the folder comes after that.
+    const name = modelName(row.model);
+    const effort = name && row.effort ? row.effort : "";
+    const px = (Number.isFinite(this.width) ? this.width : WIDE) - 104 - indent;
+    const said = label => [label, effort].filter(Boolean).join(" · ");
+    let model = "";
+    let shown = Boolean(name);
+    let where = row.inner ? row.space : [shortPath(row.cwd), row.branch].filter(Boolean).join(" · ");
+    let room = Math.floor(px / 6.5);
+    if (expanded && name) {
+      const line = Math.floor(px / 5.6);
+      model = where.length + said(name.label).length + 2 <= line ? name.label : name.family;
+      if (!row.inner) where = fitWhere(shortPath(row.cwd), row.branch, line - said(model).length - 2);
+    } else if (name) {
+      const fits = [said(name.family), effort].filter(Boolean).find(text => row.title.length + text.length + 2 <= room);
+      shown = Boolean(fits);
+      model = fits === effort ? "" : name.family;
+      if (fits) room -= fits.length + 2;
+    }
     const detail = !expanded && !(grouped && !row.inner) && folder && !row.title.toLowerCase().includes(folder.toLowerCase())
       && row.title.length + folder.length + 2 <= room ? folder : "";
-    const where = row.inner ? row.space : [shortPath(row.cwd), row.branch].filter(Boolean).join(" · ");
+    const uses = shown ? this.uses(t, row, model) : null;
     const tip = this.tip(row, now);
     const pin = div().id(`pin-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
       .role("button").accessibility_label(row.pinned ? `Unpin ${row.title}` : `Pin ${row.title}`)
@@ -434,7 +504,9 @@ export default class AgentSidebar extends View {
     const text = expanded
       ? v_flex().flex_1().min_w(0).gap(1)
         .child(title)
-        .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(where || " "))
+        .child(h_flex().min_w(0).gap(6).items_center()
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(where || " "))
+          .when(Boolean(uses), el => el.child(uses)))
       : h_flex().flex_1().min_w(0).gap(5).items_center()
         .child(title)
         .when(Boolean(detail), el => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(detail)));
@@ -462,6 +534,7 @@ export default class AgentSidebar extends View {
       .when(pinning && !armed && Boolean(row.cwd), el => el.child(here))
       .when(pinning && !armed, el => el.child(pin))
       .when(pinning, el => el.child(close))
+      .when(!expanded && !pinning && Boolean(uses), el => el.child(uses))
       .when(!pinning && Boolean(age), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(age)))
       .child(this.mark(t, row, section));
   }
@@ -482,16 +555,21 @@ export default class AgentSidebar extends View {
     const key = `${group.key}:${section.id}`;
     const open = this.isOpen(key);
     const color = section.status ? t[section.status] : t.muted;
-    // Sessions, as the filters count them: a session's own sub-agents are part of it.
+    // Sessions: a session's own sub-agents are part of it.
     const n = section.entries.filter(entry => !entry.row.inner).length;
-    return h_flex().id(`section-${key}`).h(24).flex_none().pl(10).pr(8).gap(6).items_center()
+    // A space's own color, as Herdr's tabs show it; folded, what it holds.
+    const tint = section.space ? shared("space.colors")?.[section.space] : null;
+    const dot = tint ? t[tint] : null;
+    return h_flex().id(`section-${key}`).h(HEIGHT.section).flex_none().pl(10).pr(8).gap(6).items_center()
       .role("button").accessibility_label(`${section.label}, ${n} ${n === 1 ? "session" : "sessions"}, ${open ? "expanded" : "collapsed"}`)
       .cursor_pointer().rounded(5).text_size(10.5).font_medium()
       .hover(s => s.bg(t.hover))
       .on_click((_e, cx) => this.toggle(key, cx))
-      .child(div().text_color(color).child(section.label))
-      .child(div().text_color(t.dim).child(String(n)))
+      .when(Boolean(dot), el => el.child(div().size(6).flex_none().rounded(3).bg(dot)))
+      .child(div().min_w(0).truncate().text_color(color).child(section.label))
+      .child(div().flex_none().text_color(t.dim).child(String(n)))
       .child(div().flex_1())
+      .when(Boolean(section.space !== undefined) && !open, el => el.children(this.summary(t, { rows: section.entries.map(entry => entry.row) })))
       .child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim));
   }
 
@@ -520,23 +598,27 @@ export default class AgentSidebar extends View {
       }).child(glyph("plus", 14));
   }
 
-  host(t, group, compact, first) {
-    const open = this.isOpen(group.key);
+  // `firstAway`: the first of the unreachable hosts, which sit together after the others.
+  host(t, group, compact, first, firstAway) {
+    const open = this.hostOpen(group);
+    if (isAway(group)) return this.away(t, group, compact, open, firstAway && !first);
     const color = group.remote ? t.ansi4 : t.accent;
     const state = hostState(group);
     const add = this.newButton(t, group);
+    const kind = shared(KINDS_KEY)?.[group.name ?? ""];
+    const icon = KIND_ICON[kind] ?? (group.remote ? "server" : "computer");
     const label = `${group.remote ? "Remote" : "Local"} host ${group.label}, ${counts(group.rows).all} sessions${state ? `, ${state}` : ""}, ${open ? "expanded" : "collapsed"}`;
     const root = h_flex().id(`host-${group.key}`).flex_none().items_center()
       .role("button").accessibility_label(label).cursor_pointer()
-      .tooltip(`${group.remote ? "Remote host" : "Local machine"}: ${group.label}${state ? ` · ${state}` : ""}`)
+      .tooltip(`${group.remote ? "Remote host" : "Local machine"}: ${group.label}${KIND_ICON[kind] ? ` · ${kind}` : ""}${state ? ` · ${state}` : ""}`)
       .on_click((_e, cx) => this.toggle(group.key, cx));
     if (compact) return root.h(30).px(6).gap(4).justify_center().when(!first, el => el.mt(4).border_t(1).border_color(t.border))
-      .child(glyph(group.remote ? "server" : "computer", 14).text_color(color)).child(add);
-    return root.h(state ? 42 : 34).px(8).gap(8).rounded(6)
-      .when(!first, el => el.mt(10))
+      .child(glyph(icon, 14).text_color(color)).child(add);
+    return root.h(HEIGHT.host + (state ? HEIGHT.hostState : 0)).px(8).gap(8).rounded(6)
+      .when(!first, el => el.mt(HEIGHT.hostGap))
       .hover(s => s.bg(t.hover))
       .child(glyph(open ? "chevron-down" : "chevron-right", 11).text_color(t.dim))
-      .child(glyph(group.remote ? "server" : "computer", 15).text_color(color))
+      .child(glyph(icon, 15).text_color(color))
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().min_w(0).truncate().font_semibold().text_size(12).text_color(t.foreground).child(group.label))
@@ -547,30 +629,27 @@ export default class AgentSidebar extends View {
       .child(add);
   }
 
-  // The search field, with a clear button once something is typed.
-  search(t) {
-    return h_flex().h(30).flex_none().mx(10).pl(9).pr(4).gap(7).rounded(7).bg(t.background).border(1).border_color(t.border).items_center()
-      .child(glyph("search", 13).text_color(t.muted))
-      .child(Input.new(this.input).accessibility_label("Search sessions or hosts").flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground))
-      .when(Boolean(this.query), el => el.child(div().id("clear-search").size(20).flex_none().rounded(4).flex().items_center().justify_center()
-        .role("button").accessibility_label("Clear search").tooltip("Clear search")
-        .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
-        .on_click((_e, cx) => this.clearSearch(cx)).child(glyph("x", 12))));
-  }
-
-  chips(t, tally) {
-    return h_flex().h(34).flex_none().px(10).gap(3).items_center()
-      .children(FILTERS.map(([id, label]) => {
-        const count = tally[id];
-        const on = this.filter === id;
-        const tint = id !== "all" && count ? t[id] : t.dim;
-        return h_flex().id(`filter-${id}`).h(24).px(7).gap(5).rounded(6).items_center()
-          .role("button").aria_selected(on).accessibility_label(`${label}: ${count} sessions`)
-          .cursor_pointer().text_size(10.5).text_color(on ? t.foreground : t.muted)
-          .when(on, el => el.bg(t.selected)).when(!on, el => el.hover(s => s.bg(t.hover)))
-          .on_click((_e, cx) => this.chooseFilter(id, cx)).child(label)
-          .child(div().text_size(10).font_medium().text_color(tint).child(String(count)));
-      }));
+  // An unreachable host: nothing can be opened or started there, so it gets one dim line. A
+  // click shows the sessions it had when it was last seen.
+  away(t, group, compact, open, gap) {
+    const n = counts(group.rows).all;
+    const had = n ? `${n} ${n === 1 ? "session" : "sessions"} when last seen` : "no sessions when last seen";
+    const root = h_flex().id(`host-${group.key}`).flex_none().items_center().rounded(6)
+      .role("button").accessibility_label(`Remote host ${group.label}, unavailable, ${had}, ${open ? "expanded" : "collapsed"}`)
+      .cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.muted))
+      .tooltip(`${group.label} is unavailable · ${had}${n ? ` · click to ${open ? "hide" : "show"} them` : ""}`)
+      .on_click((_e, cx) => {
+        this.revealed.has(group.key) ? this.revealed.delete(group.key) : this.revealed.add(group.key);
+        cx.notify();
+      });
+    if (compact) return root.h(22).justify_center().when(gap, el => el.mt(4)).child(glyph("offline", 12));
+    return root.h(HEIGHT.away).px(8).gap(8).when(gap, el => el.mt(HEIGHT.hostGap))
+      .child(glyph(open ? "chevron-down" : "chevron-right", 11))
+      .child(glyph("offline", 13))
+      .child(div().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(group.label))
+      .child(div().flex_none().text_size(10).child("Unavailable"))
+      .child(div().flex_1())
+      .when(n > 0, el => el.child(div().flex_none().text_size(10.5).child(String(n))));
   }
 
   render() {
@@ -593,7 +672,8 @@ export default class AgentSidebar extends View {
     this.reported = reported;
     this.rows = all;
     const tally = counts(all);
-    const sections = groups(all, hosts, this.query, this.filter);
+    this.bySpace = shared(GROUP_KEY) === "space";
+    const sections = groups(all, hosts, this.bySpace ? "space" : "status");
     const compact = this.width < RAIL;
     this.expanded = shared(DENSITY_KEY) === "expanded";
     // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
@@ -617,10 +697,11 @@ export default class AgentSidebar extends View {
       push(node, `row:${row.address}`, rowHeight);
     };
     if (this.single && compact) push(h_flex().h(30).flex_none().justify_center().items_center().child(this.newButton(t, local)));
+    const firstAway = sections.findIndex(isAway);
     sections.forEach((group, i) => {
-      if (!this.single) push(this.host(t, group, compact, i === 0), `host:${group.key}`, (hostState(group) ? 42 : 34) + (i === 0 ? 0 : 10));
+      if (!this.single) push(this.host(t, group, compact, i === 0, i === firstAway), `host:${group.key}`, hostHeight(group, i === 0, i === firstAway));
       // A host folded back when there were several must not hide everything now.
-      if (!this.single && !this.isOpen(group.key)) return;
+      if (!this.single && !this.hostOpen(group)) return;
       if (compact) {
         // Sub-agents stay in their session's tooltip: in a rail they would pass for sessions.
         for (const row of group.rows) if (!row.inner) add(row, this.railRow(t, row));
@@ -640,12 +721,11 @@ export default class AgentSidebar extends View {
           for (const entry of folder.entries) if (open || entry.row.focused) add(entry.row, this.row(t, entry, section.id, now, grouped));
         }
       }
-      if (!group.rows.length) push(div().pl(this.single ? 10 : 29).pr(12).pt(2).pb(6).text_size(11).text_color(t.muted)
+      if (!group.rows.length) push(div().pl(this.single ? 10 : 29).pr(12).pt(1).pb(5).text_size(11).text_color(t.muted)
         .child(group.layout === "ready" ? "No sessions yet · use + to start one" : group.layout === "loading" ? "Loading sessions…" : "Sessions appear when this host reconnects"), `empty:${group.key}`, HEIGHT.empty);
     });
     this.slide(t, children, keys, heights, compact, now);
-    // Not while searching or filtering: there the list is results.
-    if (!this.query.trim() && this.filter === "all") children.push(...this.extras(t, compact));
+    children.push(...this.extras(t, compact));
     setAgentOrder(this.visible.filter(r => r.kind === "agent" && !r.inner).map(r => r.address));
     // Drawn at their start: the next frame draws them at their end.
     let started = false;
@@ -654,9 +734,6 @@ export default class AgentSidebar extends View {
     const iconButton = (id, icon, tip, action) => div().id(id).size(26).flex_none().rounded(6).flex().items_center().justify_center()
       .role("button").accessibility_label(tip)
       .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click(action).child(glyph(icon, 15));
-    const empty = v_flex().px(14).py(24).gap(6)
-      .child(div().text_size(12).child(this.query.trim() ? "No matching sessions" : EMPTY[this.filter] ?? "No sessions"))
-      .child(div().text_size(11).text_color(t.muted).child(this.query.trim() ? "Try a task, shell, project, or host name." : "Choose All to see every session."));
     return v_flex().id("agent-sidebar").size_full().min_h(0).bg(t.chrome).text_color(t.foreground)
       .track_focus(this.handle)
       .on_size_change((size, cx) => {
@@ -665,9 +742,13 @@ export default class AgentSidebar extends View {
       })
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
-          // First Escape clears the search; the next returns to the current session.
-          if (this.query) this.clearSearch(cx);
-          else this.open(this.visible.find(r => r.focused));
+          // Back to the current session.
+          this.selected = null;
+          this.open(this.visible.find(r => r.focused));
+        } else if (e.key === "enter") {
+          const row = this.visible.find(r => r.address === this.selected);
+          if (!row) return;
+          this.open(row);
         } else if (e.key === "down" || e.key === "up") {
           if (!this.visible.length) return;
           const current = this.visible.findIndex(r => r.address === this.selected);
@@ -680,20 +761,18 @@ export default class AgentSidebar extends View {
         cx.notify();
       })
       .when(!compact, el => el
-        .child(h_flex().h(40).flex_none().pl(16).pr(10).gap(8).items_center()
-          .child(div().font_semibold().text_size(15).child("Sessions"))
-          .child(div().text_size(12).text_color(t.muted).child(String(tally.all)))
+        .child(h_flex().id("sessions-header").h(34).flex_none().pl(16).pr(10).gap(6).items_center()
+          .child(div().font_semibold().text_size(14).child("Sessions"))
+          .child(div().id("sessions-count").text_size(11.5).text_color(t.muted).child(String(tally.all)))
           .child(div().flex_1())
           .when(this.single, el => el.child(this.newButton(t, local, 26)))
+          .child(this.groupButton(t))
           .child(this.densityButton(t))
-          .child(this.settingsButton(t)))
-        .child(this.search(t))
-        .child(this.chips(t, tally)))
+          .child(this.settingsButton(t))))
       .when(compact, el => el.child(h_flex().h(34).flex_none().justify_center().items_center()
         .child(iconButton("expand-agents", "panel-left", "Expand sessions", () => this.expand()))))
       .child(v_flex().id("host-agent-list").flex_1().min_h(0).px(6).pt(compact ? 0 : 2).pb(12).overflow_y_scrollbar().track_scroll(this.scroll)
-        .role("list_box").accessibility_label(this.single ? "Sessions grouped by status" : "Sessions grouped by machine, then by status")
-        .children(children)
-        .when(!sections.length && !compact, el => el.child(empty)));
+        .role("list_box").accessibility_label(`Sessions grouped by ${this.single ? "" : "machine, then by "}${this.bySpace ? "space" : "status"}`)
+        .children(children));
   }
 }
