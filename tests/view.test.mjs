@@ -302,10 +302,10 @@ test("no footer: Settings sits in the header and Add machine follows the hosts",
   const list = find(root, "host-agent-list");
   assert.equal(list.nodes.at(-1).props.id, "add-machine");
   assert.equal(root.nodes.at(-1), list); // the list is the last thing in the sidebar
-  // The gear is the sidebar's own settings, in a popup; Herdr's are inside it.
+  // The gear is the sidebar's own settings, in a window; Herdr's are inside it.
   find(root, "settings").props.on_click();
   find(root, "add-machine").props.on_click();
-  assert.deepEqual(h.overlays, [{ mod: "agent-sidebar", kind: "popup", width: 300, height: 560, props: { settings: true } }]);
+  assert.deepEqual(h.overlays, [{ mod: "agent-sidebar", kind: "dialog", width: 660, height: 520, props: { settings: true } }]);
   assert.deepEqual(h.commands, [{ name: "mod.open", args: { name: "machine-add" } }]);
 });
 
@@ -1467,40 +1467,56 @@ test("a terminal an agent started stays with it; a narrow title bar keeps its bu
   assert.deepEqual(ids(h.view.render()).filter(id => id.startsWith("folder-")), []);
 });
 
-test("the gear's popup is the sidebar's settings: every choice is shared state, and Herdr's settings are a click further", () => {
+test("the gear's window is the sidebar's settings, in tabs: every choice is shared state, and Herdr's settings are a click further", () => {
   const h = setup({ settings: true });
   let root = h.view.render();
   assert.equal(root.props.id, "sidebar-settings");
-  // A popup takes the height of what is in it: the panel says its own, so its list has room.
-  assert.deepEqual([root.props.h, find(root, "sidebar-settings-list").props.flex_1 !== undefined], [560, true]);
+  // The window says its own height, so the tab that scrolls has room.
+  assert.deepEqual([root.props.h, find(root, "sidebar-settings-list").props.flex_1 !== undefined], [520, true]);
+  // Four tabs, the first one shown; each says what it is about.
+  const tabs = ["layout", "list", "sessions", "organize"];
+  assert.deepEqual(tabs.map(tab => find(root, `tab-${tab}`).props.aria_selected), [true, false, false, false]);
+  assert.match(text(find(root, "sidebar-settings-list")), /Layout How the list is arranged\./);
+  // A control, wherever its tab is: the tab is opened first.
+  const at = id => {
+    for (const tab of tabs) {
+      find(h.view.render(), `tab-${tab}`).props.on_click(null, h.cx);
+      const node = find(h.view.render(), id);
+      if (node) return node;
+    }
+    return null;
+  };
+  assert.deepEqual(tabs.map(tab => { find(h.view.render(), `tab-${tab}`).props.on_click(null, h.cx); return ids(find(h.view.render(), "sidebar-settings-list")).filter(id => /^set-[a-zA-Z]+$/.test(id)).length; }), [4, 7, 8, 4]);
+  find(h.view.render(), "tab-layout").props.on_click(null, h.cx);
+  root = h.view.render();
   // Rows and grouping, each one of a few.
   assert.equal(find(root, "set-density-compact").props.aria_selected, true);
   find(root, "set-density-expanded").props.on_click(null, h.cx);
   find(root, "set-group-project").props.on_click(null, h.cx);
   assert.deepEqual([h.sharedState["agent-sidebar.density"], h.sharedState["agent-sidebar.group"]], ["expanded", "project"]);
-  assert.equal(find(h.view.render(), "set-group-project").props.aria_selected, true);
+  assert.equal(at("set-group-project").props.aria_selected, true);
   // Every switch is there, on by default; a click turns it off, another back on.
   const keys = Object.keys(model.DEFAULTS).filter(key => typeof model.DEFAULTS[key] === "boolean");
   assert.equal(keys.length, 17);
   // Organize asks Claude Code or Codex, each with the families it has.
-  assert.ok(find(h.view.render(), "set-organizeModel-sonnet") && !find(h.view.render(), "set-organizeCodex-terra"));
-  find(h.view.render(), "set-organizeWith-codex").props.on_click(null, h.cx);
-  assert.equal(find(h.view.render(), "set-organizeCodex-terra").props.aria_selected, true);
-  find(h.view.render(), "set-organizeCodex-sol").props.on_click(null, h.cx);
+  assert.ok(at("set-organizeModel-sonnet") && !at("set-organizeCodex-terra"));
+  at("set-organizeWith-codex").props.on_click(null, h.cx);
+  assert.equal(at("set-organizeCodex-terra").props.aria_selected, true);
+  at("set-organizeCodex-sol").props.on_click(null, h.cx);
   assert.deepEqual([h.sharedState["agent-sidebar.settings"].organizeWith, h.sharedState["agent-sidebar.settings"].organizeCodex], ["codex", "sol"]);
-  find(h.view.render(), "set-organizeWith-claude").props.on_click(null, h.cx);
+  at("set-organizeWith-claude").props.on_click(null, h.cx);
   for (const key of keys) {
-    assert.equal(find(h.view.render(), `set-${key}`).props.aria_selected, true, key);
-    find(h.view.render(), `set-${key}`).props.on_click(null, h.cx);
+    assert.equal(at(`set-${key}`).props.aria_selected, true, key);
+    at(`set-${key}`).props.on_click(null, h.cx);
     assert.equal(h.sharedState["agent-sidebar.settings"][key], false, key);
-    assert.equal(find(h.view.render(), `set-${key}`).props.aria_selected, false, key);
+    assert.equal(at(`set-${key}`).props.aria_selected, false, key);
   }
-  find(h.view.render(), "set-model").props.on_click(null, h.cx);
+  at("set-model").props.on_click(null, h.cx);
   assert.equal(h.sharedState["agent-sidebar.settings"].model, true);
   // The ones of a few: how old is old, and what Organize asks.
-  find(h.view.render(), "set-cleanupDays-7").props.on_click(null, h.cx);
-  find(h.view.render(), "set-organizeModel-haiku").props.on_click(null, h.cx);
-  find(h.view.render(), "set-organizeEffort-high").props.on_click(null, h.cx);
+  at("set-cleanupDays-7").props.on_click(null, h.cx);
+  at("set-organizeModel-haiku").props.on_click(null, h.cx);
+  at("set-organizeEffort-high").props.on_click(null, h.cx);
   assert.deepEqual(model.settingsOf(h.sharedState["agent-sidebar.settings"]).cleanupDays, 7);
   assert.deepEqual([h.sharedState["agent-sidebar.settings"].organizeModel, h.sharedState["agent-sidebar.settings"].organizeEffort], ["haiku", "high"]);
   // Reset is the defaults again; what is saved wrong is the default too.
@@ -1509,8 +1525,12 @@ test("the gear's popup is the sidebar's settings: every choice is shared state, 
   assert.deepEqual(model.settingsOf({ model: "yes", cleanupDays: 2, organizeModel: "gpt", age: false }), { ...model.DEFAULTS, age: false });
   assert.deepEqual(model.settingsOf(undefined), model.DEFAULTS);
   // Herdr's own settings, and the way out.
+  assert.match(text(at("organize-sends")), /to Anthropic\./);
+  at("set-organizeWith-codex").props.on_click(null, h.cx);
+  assert.match(text(find(h.view.render(), "organize-sends")), /to OpenAI\./);
   find(h.view.render(), "herdr-settings").props.on_click(null, h.cx);
   assert.deepEqual(h.commands, [{ name: "app.settings", args: undefined }]);
+  assert.ok(find(h.view.render(), "settings-done") && find(h.view.render(), "settings-close"));
 });
 
 test("each setting changes what the sidebar shows, and what it asks the machines", async () => {

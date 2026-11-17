@@ -52,7 +52,7 @@ installer. Background work, sub-agents, and each session's model and effort are 
 | To | Do |
 | --- | --- |
 | Open a session | Click it. Herdr focuses its pane, or peeks at it if it has none. |
-| Change what the sidebar shows | Click the gear in the title bar (or bind a key to `agent-sidebar.settings`). The settings are the sidebar's own: rows and grouping; folder headings, sub-agents, shells and machines that are away; what each session shows (model, effort and its colors, what it is doing, context size, lines changed, pull request, time in its state); the lines under the list (Add machine, Recently closed, Clean up and how old is old); the Organize button, whether it asks Claude Code or Codex, and its model and effort; and motion. Each is kept in Herdr's shared state, so every copy of the sidebar follows. Turning off lines changed or pull requests also stops asking git or GitHub for them. **Herdr settings…** at the bottom opens Herdr's own, and **Reset** brings the defaults back. |
+| Change what the sidebar shows | Click the gear in the title bar (or bind a key to `agent-sidebar.settings`). The sidebar's own settings open in a window with four tabs. **Layout:** rows, grouping, folder headings and motion. **List:** sub-agents, shells, machines that are away, and the lines under the list (Add machine, Recently closed, Clean up and how old is old). **Sessions:** what each row says (model, effort and its colors, what it is doing, context size, lines changed, pull request, time in its state). **Organize:** the star's button, whether it asks Claude Code or Codex, and its model and effort. Each choice is kept in Herdr's shared state, so every copy of the sidebar follows. Turning off lines changed or pull requests also stops asking git or GitHub for them. **Herdr settings…** at the bottom opens Herdr's own, and **Reset to defaults** brings the defaults back. |
 | Pick one from the keyboard | With the sidebar focused (`pane.go`), Up and Down move through the sessions and Enter opens the one picked; Escape returns to the current session. |
 | Keep a session near the top | Hover its row and click the pin. A pinned session that has nothing to report sits under Pinned, above the idle ones, and comes first in its section otherwise. |
 | Fold a machine or a section | Click its heading. A folded machine still shows how many sessions need you, work or are done. |
@@ -245,7 +245,7 @@ python3 scripts/preview.py         # preview.png again, from example sessions (n
   and `launcher.js` the launcher behind each machine's **+**.
 - **`mods/agent-sidebar/folders.js`** picks the folders the launcher offers and where a session
   there opens, and holds its two `sh` scripts. Plain JavaScript too.
-- **`mods/agent-sidebar/settings.js`** is the popup behind the gear, and **`demo.js`** the example
+- **`mods/agent-sidebar/settings.js`** is the window behind the gear, and **`demo.js`** the example
   sessions of the picture above: `agent-sidebar.demo` opens a copy that shows them and asks no
   machine anything.
 - **`scripts/install.py`** installs, updates and removes it; `install.sh` fetches the repository

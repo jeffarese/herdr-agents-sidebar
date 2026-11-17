@@ -96,7 +96,7 @@ export default class AgentSidebar extends View {
     const initial = props() ?? {};
     this.launcher = Boolean(initial.launcher);
     if (this.launcher) { initLauncher(this, initial, cx); return; }
-    // The gear's popup is this mod too, showing its settings.
+    // The gear's window is this mod too, showing its settings.
     if (initial.settings) { initSettings(this); return; }
     // What the sidebar shows: the app, or example sessions for the README's picture (demo.js),
     // which ask no machine anything.
@@ -168,7 +168,7 @@ export default class AgentSidebar extends View {
         else if (command === "browse") this.browse();
         else if (command === "density") this.toggleDensity();
         else if (command === "group") this.toggleGroup();
-        else if (command === "settings") this.openSettings("dialog");
+        else if (command === "settings") this.openSettings();
         // The README's picture: a copy with example sessions, to take a shot of.
         else if (command === "demo") openOverlay({ mod: "agent-sidebar", kind: "dialog", width: 340, height: 846, props: { demo: true } });
         // Asks Claude; again, puts its suggestion (or the asking) away.
@@ -706,13 +706,13 @@ export default class AgentSidebar extends View {
       : [add.mt(6).px(8).child("Add machine")];
   }
 
-  // At the pointer from the gear, centered from a key (bind one to agent-sidebar.settings).
-  openSettings(kind = "popup") {
-    openOverlay({ mod: "agent-sidebar", kind, width: SETTINGS.width, height: SETTINGS.height, props: { settings: true } });
+  // A window over the app, from the gear or a key (bind one to agent-sidebar.settings).
+  openSettings() {
+    openOverlay({ mod: "agent-sidebar", kind: "dialog", width: SETTINGS.width, height: SETTINGS.height, props: { settings: true } });
   }
 
-  // The sidebar's own settings (settings.js), in a popup at the pointer. Herdr's are a click
-  // further, inside it; an update that is ready still shows here.
+  // The sidebar's own settings (settings.js), in a window. Herdr's are a click further, inside
+  // it; an update that is ready still shows here.
   settingsButton(t) {
     const ready = Boolean(updates().app.ready);
     const tip = ready ? "Sessions settings · Herdr update ready" : "Sessions settings";
