@@ -1,10 +1,11 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder, readTextFile, home } from "herdr";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, latestCodex, organizeAnswer, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
 import { PROBE, PROBE_MS, KIND, CHANGES, PULLS, parseChanges, parsePulls, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 import { initSettings, renderSettings, SETTINGS } from "./settings.js";
+import { demo } from "./demo.js";
 
 const ART = "mods/agent-sidebar/";
 const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
@@ -41,8 +42,18 @@ const CLOSED_KEY = "agent-sidebar.closed";
 // The effort a session runs with, as a scale: the more of it, the warmer. Low is the plain
 // gray of the rest, then blue, green, yellow and red, and the most is also heavier.
 const EFFORT_COLOR = { low: "muted", medium: "ansi4", high: "ansi2", xhigh: "ansi3", max: "ansi1" };
-// Asks Claude (Sonnet, low effort) through Claude Code's own print mode on this computer: no
-// tools, no session kept. PATH as a login would have it: the app's own may lack it.
+// Asks Claude through Claude Code's own print mode on this computer, or Codex through its exec
+// mode: no tools or a read-only sandbox, and no session kept. PATH as a login would have it:
+// the app's own may lack it. Codex takes its schema from a file and leaves its answer in one.
+const CODEX_SH = `command -v codex >/dev/null 2>&1 || PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+dir=$(mktemp -d) || exit 1
+trap 'rm -rf "$dir"' EXIT
+printf '%s' "$1" > "$dir/schema.json"
+shift
+codex exec --skip-git-repo-check --ephemeral --sandbox read-only --color never --output-schema "$dir/schema.json" -o "$dir/answer.json" "$@" < /dev/null > "$dir/log" 2>&1 || { tail -c 300 "$dir/log" >&2; exit 1; }
+cat "$dir/answer.json"
+`;
+const ASKED = { claude: "Claude", codex: "Codex" };
 const ORGANIZE_SH = 'command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:$PATH"; exec claude "$@" < /dev/null';
 const organizeArgs = cfg => ["-p", "--model", cfg.organizeModel, "--effort", cfg.organizeEffort, "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--output-format", "json"];
 const NAME_MS = 15000;
@@ -87,7 +98,15 @@ export default class AgentSidebar extends View {
     if (this.launcher) { initLauncher(this, initial, cx); return; }
     // The gear's popup is this mod too, showing its settings.
     if (initial.settings) { initSettings(this); return; }
-    this.cfg = settingsOf(shared(SETTINGS_KEY));
+    // What the sidebar shows: the app, or example sessions for the README's picture (demo.js),
+    // which ask no machine anything.
+    const example = initial.demo ? demo(Date.now()) : null;
+    this.demo = Boolean(example);
+    this.x = example ? {
+      machines: () => example.machines, panes: () => example.panes, agents: () => [], terminals: () => example.terminals,
+      spaces: () => example.spaces, focused: () => example.focused, shared: key => example.shared[key],
+    } : { machines, panes, agents, terminals, spaces, focused, shared };
+    this.cfg = settingsOf(this.x.shared(SETTINGS_KEY));
     this.selected = null;
     this.hovered = null;
     this.width = Infinity;
@@ -101,7 +120,9 @@ export default class AgentSidebar extends View {
     this.pending = [];
     // New spaces a move makes, to name once Herdr shows them: { id, name, at }.
     this.naming = [];
-    // Claude's suggestion for the spaces: null, "asking", or { renames, moves } to apply.
+    // The suggestion for the spaces (Claude's or Codex's, `asked`): null, "asking", or
+    // { renames, moves } to apply.
+    this.asked = "Claude";
     this.plan = null;
     // The moves of that suggestion the person took out, and which asking an answer is for.
     this.skip = new Set();
@@ -143,11 +164,13 @@ export default class AgentSidebar extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") this.handle.focus();
-        else if (command === "new") this.launch(spaces().find(space => space.id === focused()?.space)?.machine ?? null, {}, "dialog");
+        else if (command === "new") this.launch(this.x.spaces().find(space => space.id === this.x.focused()?.space)?.machine ?? null, {}, "dialog");
         else if (command === "browse") this.browse();
         else if (command === "density") this.toggleDensity();
         else if (command === "group") this.toggleGroup();
         else if (command === "settings") this.openSettings("dialog");
+        // The README's picture: a copy with example sessions, to take a shot of.
+        else if (command === "demo") openOverlay({ mod: "agent-sidebar", kind: "dialog", width: 340, height: 846, props: { demo: true } });
         // Asks Claude; again, puts its suggestion (or the asking) away.
         else if (command === "organize") this.plan ? this.dismissPlan() : this.organize();
         cx.notify();
@@ -165,13 +188,16 @@ export default class AgentSidebar extends View {
     this.stale = new Set(); // machines to ask again as soon as allowed
     this.kinds = new Map(); // machine → true once it said what it is, else when it was asked
     this.git = new Map(); // machine → { changes, pulls: folder → what git and GitHub said, asked, pulled: when }
+    if (example) Object.assign(this, { work: example.work, git: example.git });
     cx.spawn(async cx => {
       let wake = () => {};
       for (;;) {
-        this.probe(() => wake());
-        this.askKinds(() => wake());
-        this.askGit(() => wake());
-        this.finishMoves();
+        if (!this.demo) {
+          this.probe(() => wake());
+          this.askKinds(() => wake());
+          this.askGit(() => wake());
+          this.finishMoves();
+        }
         // A second, or less when an answer arrives or a move is under way.
         await Promise.race([cx.sleep(this.pending.length || this.naming.length ? 250 : 1000), new Promise(resolve => { wake = resolve; })]);
         // A session held back as leaving comes back if it is still there after LEAVE_MS.
@@ -225,7 +251,7 @@ export default class AgentSidebar extends View {
   // asked again a minute later, and keeps the icon of its place (this computer, or a remote).
   askKinds(answered) {
     const now = Date.now();
-    for (const host of machines()) {
+    for (const host of this.x.machines()) {
       const name = host.name ?? null;
       const asked = this.kinds.get(name);
       if (host.layout !== "ready" || asked === true || now - (asked ?? 0) < KIND_RETRY_MS) continue;
@@ -234,7 +260,7 @@ export default class AgentSidebar extends View {
         const kind = result.code === 0 ? machineKind(result.stdout) : null;
         if (!kind) return;
         this.kinds.set(name, true);
-        if (shared(KINDS_KEY)?.[name ?? ""] === kind) return;
+        if (this.x.shared(KINDS_KEY)?.[name ?? ""] === kind) return;
         setShared(KINDS_KEY, { ...shared(KINDS_KEY), [name ?? ""]: kind });
         this.changed = true;
         answered();
@@ -276,7 +302,7 @@ export default class AgentSidebar extends View {
   // The launcher: a folder, then a shell or an agent to start there. At the pointer from a +,
   // centered from the keyboard. `extra`: { folder, tag } to start from.
   launch(machine, extra = {}, kind = "popup") {
-    if (!machines().some(host => (host.name ?? null) === machine && host.layout === "ready")) return;
+    if (!this.x.machines().some(host => (host.name ?? null) === machine && host.layout === "ready")) return;
     openOverlay({ mod: "agent-sidebar", kind, width: LAUNCHER.width, height: LAUNCHER.height, props: { launcher: true, machine, ...extra } });
   }
 
@@ -347,7 +373,7 @@ export default class AgentSidebar extends View {
   }
 
   toggleDensity() {
-    setShared(DENSITY_KEY, shared(DENSITY_KEY) === "expanded" ? "compact" : "expanded");
+    setShared(DENSITY_KEY, this.x.shared(DENSITY_KEY) === "expanded" ? "compact" : "expanded");
   }
 
   // Choosing where sessions go: every space they can go to takes the next click (or the drop).
@@ -374,18 +400,18 @@ export default class AgentSidebar extends View {
   finishMoves() {
     const now_ = Date.now();
     for (const space of this.naming.slice()) {
-      const shown = spaces().some(other => other.id === space.id);
+      const shown = this.x.spaces().some(other => other.id === space.id);
       if (shown) run("space.rename", { id: space.id, name: space.name });
       if (shown || now_ - space.at > NAME_MS) this.naming.splice(this.naming.indexOf(space), 1);
     }
     if (!this.pending.length) return;
-    const placed = new Set(panes().filter(pane => pane.terminal).map(pane => pane.terminal));
+    const placed = new Set(this.x.panes().filter(pane => pane.terminal).map(pane => pane.terminal));
     const now = Date.now();
     for (const move of this.pending.slice()) {
       const gone = !placed.has(move.address);
       if (!gone && now - move.at < MOVE_MS) continue;
       this.pending.splice(this.pending.indexOf(move), 1);
-      const name = move.name ?? spaces().find(space => space.id === move.space)?.name ?? "the space";
+      const name = move.name ?? this.x.spaces().find(space => space.id === move.space)?.name ?? "the space";
       // Still there: nothing was changed. Parked but not labeled: it runs on without a pane,
       // listed here under "No space", where a click peeks at it.
       const failed = body => notify({ title: `Could not move ${move.row.title}`, body, level: "warning" });
@@ -455,12 +481,12 @@ export default class AgentSidebar extends View {
       .child(div().flex_1())
       .child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim));
     if (!open) return [heading];
-    const forget = entry => setShared(CLOSED_KEY, (shared(CLOSED_KEY) ?? []).filter(other => other.session !== entry.session));
+    const forget = entry => setShared(CLOSED_KEY, (this.x.shared(CLOSED_KEY) ?? []).filter(other => other.session !== entry.session));
     return [heading, ...closed.map(entry => h_flex().id(`closed-${entry.session}`).h(26).flex_none().rounded(6).pl(8).pr(6).gap(8).items_center()
       .role("button").accessibility_label(`Reopen ${entry.title}`).cursor_pointer().hover(s => s.bg(t.hover))
       .tooltip([`Reopen ${entry.title}`, this.single ? "" : entry.machine ?? "This computer", entry.cwd, `claude --resume ${entry.session}`].filter(Boolean).join("\n"))
       .on_click((_e, cx) => {
-        const action = resumeAction(entry, machines(), spaces(), focused());
+        const action = resumeAction(entry, this.x.machines(), this.x.spaces(), this.x.focused());
         if (!action) return;
         run(action.name, action.args);
         forget(entry);
@@ -480,21 +506,28 @@ export default class AgentSidebar extends View {
   organize(answered = () => {}) {
     if (this.plan === "asking") return;
     const rows = this.rows ?? [];
-    const { prompt, ids } = organizeBrief(rows, spaces());
+    const { prompt, ids } = organizeBrief(rows, this.x.spaces());
     if (!ids.size) return;
     this.plan = "asking";
     this.skip = new Set();
     // An answer to an asking that was dismissed is dropped.
     const ask = ++this.asks;
     const failed = why => { if (ask !== this.asks) return; this.plan = null; notify({ title: "Could not organize the sessions", body: String(why ?? "").trim().slice(0, 200), level: "warning" }); };
-    exec("sh", ["-c", ORGANIZE_SH, "sh", ...organizeArgs(this.cfg), "--json-schema", JSON.stringify(ORGANIZE_SCHEMA), "--system-prompt", ORGANIZE_SYSTEM, prompt], { on: null, timeout: 120000 }).then(result => {
-      let answer = null;
-      try { const out = JSON.parse(result.stdout); answer = out.structured_output ?? JSON.parse(out.result); } catch { /* said below */ }
+    const cfg = this.cfg;
+    const codex = cfg.organizeWith === "codex";
+    const who = this.asked = ASKED[cfg.organizeWith];
+    const schema = JSON.stringify(ORGANIZE_SCHEMA);
+    // Codex is given the latest model of the family chosen, as its own list has it.
+    const asking = !codex ? exec("sh", ["-c", ORGANIZE_SH, "sh", ...organizeArgs(cfg), "--json-schema", schema, "--system-prompt", ORGANIZE_SYSTEM, prompt], { on: null, timeout: 120000 })
+      : (cfg.organizeCodex === "auto" ? Promise.resolve(null) : readTextFile(`${home()}/.codex/models_cache.json`).then(cache => latestCodex(cache, cfg.organizeCodex)).catch(() => null))
+        .then(model => exec("sh", ["-c", CODEX_SH, "sh", schema, ...(model ? ["-m", model] : []), "-c", `model_reasoning_effort="${cfg.organizeEffort}"`, `${ORGANIZE_SYSTEM}\n\n${prompt}`], { on: null, timeout: 180000 }));
+    asking.then(result => {
+      const answer = organizeAnswer(result.stdout);
       if (ask !== this.asks) return;
-      if (result.code !== 0 || !answer) return failed(result.stderr || "Claude Code gave no answer. Is `claude` installed and signed in on this computer?");
-      const plan = organizePlan(this.rows ?? rows, spaces(), answer, ids, machine => `${machine == null ? "" : `${machine}/`}sp${hex(32)}`);
+      if (result.code !== 0 || !answer) return failed(result.stderr || `${who} gave no answer. Is \`${codex ? "codex" : "claude"}\` installed and signed in on this computer?`);
+      const plan = organizePlan(this.rows ?? rows, this.x.spaces(), answer, ids, machine => `${machine == null ? "" : `${machine}/`}sp${hex(32)}`);
       if (plan.renames.length || plan.moves.length) this.plan = plan;
-      else { this.plan = null; notify({ title: "Already organized", body: "Claude would leave every session where it is.", level: "info", timeout: 3000 }); }
+      else { this.plan = null; notify({ title: "Already organized", body: `${who} would leave every session where it is.`, level: "info", timeout: 3000 }); }
     }).catch(failed).finally(() => { this.changed = true; answered(); });
   }
 
@@ -520,7 +553,9 @@ export default class AgentSidebar extends View {
 
   organizeButton(t) {
     const asking = this.plan === "asking";
-    const tip = asking ? "Asking Claude…" : `Organize into spaces with Claude (${this.cfg.organizeModel}, ${this.cfg.organizeEffort} effort): previews, then asks`;
+    const codex = this.cfg.organizeWith === "codex";
+    const model = codex ? (this.cfg.organizeCodex === "auto" ? "its own model" : `latest ${this.cfg.organizeCodex}`) : this.cfg.organizeModel;
+    const tip = asking ? `Asking ${this.asked}…` : `Organize into spaces with ${ASKED[this.cfg.organizeWith]} (${model}, ${this.cfg.organizeEffort} effort): previews, then asks`;
     return div().id("organize").size(26).flex_none().rounded(6).flex().items_center().justify_center()
       .role("button").accessibility_label(tip).cursor_pointer().text_color(asking ? t.accent : t.muted)
       .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
@@ -541,7 +576,7 @@ export default class AgentSidebar extends View {
     if (!preview) {
       return box.child(h_flex().gap(7).items_center()
         .child(glyph("sparkles", 13).text_color(t.accent).loop("opacity", { from: 0.35, to: 1, period: 1100 }))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child("Asking Claude how to arrange them…"))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child(`Asking ${this.asked} how to arrange them…`))
         .child(button("plan-dismiss", "Cancel", false, dismiss)));
     }
     const count = (n, one, many) => n ? `${n} ${n === 1 ? one : many}` : "";
@@ -550,7 +585,7 @@ export default class AgentSidebar extends View {
     return box
       .child(h_flex().gap(7).items_center()
         .child(glyph("sparkles", 13).text_color(t.accent))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child("Claude's suggestion, previewed below")))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child(`${this.asked}'s suggestion, previewed below`)))
       .child(div().text_size(11).text_color(t.muted).child(summary))
       .child(div().text_size(10.5).text_color(t.dim).child("Highlighted sessions would move. Click one to leave it where it is. Nothing changes until you apply; Esc dismisses."))
       .child(h_flex().gap(6).mt(1).items_center()
@@ -559,7 +594,7 @@ export default class AgentSidebar extends View {
   }
 
   recolor(space) {
-    const colors = shared("space.colors") ?? {};
+    const colors = this.x.shared("space.colors") ?? {};
     const next = SPACE_COLORS[(SPACE_COLORS.indexOf(colors[space] ?? SPACE_COLORS[0]) + 1) % SPACE_COLORS.length];
     setShared("space.colors", { ...colors, [space]: next });
   }
@@ -601,7 +636,7 @@ export default class AgentSidebar extends View {
     }
     else if (drag.row && this.moving?.dragged) this.moving = null;
     else if (drag.space && space && space !== drag.space && drag.machine === (group.name ?? null)) {
-      const index = spaces().findIndex(other => other.id === space);
+      const index = this.x.spaces().findIndex(other => other.id === space);
       if (index !== -1) run("space.move", { id: drag.space, index: index + 1 });
     }
     cx.notify();
@@ -625,7 +660,7 @@ export default class AgentSidebar extends View {
   }
 
   groupBy() {
-    return GROUPINGS.includes(shared(GROUP_KEY)) ? shared(GROUP_KEY) : "status";
+    return GROUPINGS.includes(this.x.shared(GROUP_KEY)) ? this.x.shared(GROUP_KEY) : "status";
   }
 
   // Sessions of one status working in the same folder, when there are several.
@@ -656,7 +691,7 @@ export default class AgentSidebar extends View {
   // Back from the rail to the width Herdr's own sidebar toggle remembered.
   expand() {
     setShared("sidebar.collapsed", false);
-    run("layout.resize", { id: "sidebar", px: Math.max(240, Number(shared("sidebar.width")) || WIDE) });
+    run("layout.resize", { id: "sidebar", px: Math.max(240, Number(this.x.shared("sidebar.width")) || WIDE) });
   }
 
   // Settings and Add machine live here, so the sidebar needs no footer.
@@ -878,7 +913,7 @@ export default class AgentSidebar extends View {
       })
       .child(glyph("reply", 12));
     // To another space: every space it can go to then takes the click.
-    const others = movable(row) && spaces().filter(space => (space.machine ?? null) === row.machine && space.id !== row.spaceId).length > 0;
+    const others = movable(row) && this.x.spaces().filter(space => (space.machine ?? null) === row.machine && space.id !== row.spaceId).length > 0;
     const move = div().id(`move-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
       .role("button").accessibility_label(`Move ${row.title} to another space`)
       .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
@@ -997,7 +1032,7 @@ export default class AgentSidebar extends View {
     const n = section.entries.filter(entry => !entry.row.inner).length;
     // One of Herdr's spaces (not "No space"): it has Herdr's color, and things to do with it.
     const space = section.space || null;
-    const dot = space ? t[shared("space.colors")?.[space] ?? SPACE_COLORS[0]] : null;
+    const dot = space ? t[this.x.shared("space.colors")?.[space] ?? SPACE_COLORS[0]] : null;
     // While sessions are being moved, a space they can go to says so and takes the click.
     const target = this.isTarget(group, section);
     const hovered = this.hoveredSection === key && Boolean(space) && !this.moving && !this.preview;
@@ -1042,7 +1077,7 @@ export default class AgentSidebar extends View {
       .when((section.space !== undefined || section.project) && !open && !target && !hovered, el => el.children(this.summary(t, { rows })))
       .when(hovered, el => el
         .child(act("space-new", "plus", "New shell or agent in this space", () => this.launch(group.name ?? null, { space })))
-        .when(n > 0 && spaces().some(other => (other.machine ?? null) === (group.name ?? null) && other.id !== space),
+        .when(n > 0 && this.x.spaces().some(other => (other.machine ?? null) === (group.name ?? null) && other.id !== space),
           el => el.child(act("space-merge", "merge", "Move all its sessions to another space", () => this.startMove(rows, `all of ${section.label}`, space))))
         .child(act("space-more", "more", "Rename, worktrees, close", () => this.spaceMenu(space))))
       .when(!hovered, el => el.child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim)));
@@ -1081,7 +1116,7 @@ export default class AgentSidebar extends View {
     const state = hostState(group);
     const add = this.newButton(t, group);
     const space = this.bySpace && !state ? this.newSpaceButton(t, group) : null;
-    const kind = shared(KINDS_KEY)?.[group.name ?? ""];
+    const kind = this.x.shared(KINDS_KEY)?.[group.name ?? ""];
     const icon = KIND_ICON[kind] ?? (group.remote ? "server" : "computer");
     const label = `${group.remote ? "Remote" : "Local"} host ${group.label}, ${counts(group.rows).all} sessions${state ? `, ${state}` : ""}, ${open ? "expanded" : "collapsed"}`;
     const root = h_flex().id(`host-${group.key}`).flex_none().items_center()
@@ -1141,13 +1176,13 @@ export default class AgentSidebar extends View {
   render() {
     if (this.launcher) return renderLauncher(this);
     if (this.panel) return renderSettings(this);
-    const cfg = this.cfg = settingsOf(shared(SETTINGS_KEY));
+    const cfg = this.cfg = settingsOf(this.x.shared(SETTINGS_KEY));
     const t = /** @type {Record<string, import("gpui-kit").Color>} */ (theme());
-    const hosts = machines();
+    const hosts = this.x.machines();
     const now = Date.now();
-    const shownPanes = panes();
+    const shownPanes = this.x.panes();
     const placed = new Set(shownPanes.filter(pane => pane.terminal).map(pane => pane.terminal));
-    const built = build({ agents: agents(), terminals: terminals(), panes: shownPanes, spaces: spaces(), machines: hosts, focused: focused(), work: this.work, now });
+    const built = build({ agents: this.x.agents(), terminals: this.x.terminals(), panes: shownPanes, spaces: this.x.spaces(), machines: hosts, focused: this.x.focused(), work: this.work, now });
     for (const address of this.parked) if (placed.has(address) || !built.some(row => row.address === address)) this.parked.delete(address);
     const staying = new Set([...this.pending.map(move => move.address), ...this.parked]);
     const all = holdDone(dropLeaving(built, this.leaving, this.placed, placed, now, staying), this.shown ?? new Map());
@@ -1163,9 +1198,9 @@ export default class AgentSidebar extends View {
     this.reported = reported;
     this.rows = all;
     // Sessions whose terminal is gone from a machine that answers have ended: kept to reopen.
-    const gone = ended(this.known, new Set(terminals().filter(terminal => terminal.state === "live").map(terminal => terminal.address)),
+    const gone = ended(this.known, new Set(this.x.terminals().filter(terminal => terminal.state === "live").map(terminal => terminal.address)),
       new Set(hosts.filter(host => host.layout === "ready").map(host => host.name ?? null)));
-    if (gone.length) setShared(CLOSED_KEY, gone.reduce((list, seen) => remember(list, seen, now), shared(CLOSED_KEY) ?? []));
+    if (gone.length) setShared(CLOSED_KEY, gone.reduce((list, seen) => remember(list, seen, now), this.x.shared(CLOSED_KEY) ?? []));
     for (const row of all) if (row.kind === "agent" && !row.inner && row.available && row.session) this.known.set(row.address, { title: row.title, cwd: row.cwd, machine: row.machine, session: row.session });
     if (this.replying && !canReply(all.find(row => row.address === this.replying))) this.replying = null;
     // What the settings leave out of the list is still there: a sub-agent still holds its session
@@ -1175,14 +1210,14 @@ export default class AgentSidebar extends View {
     // Sessions move between spaces, so choosing where shows the spaces whatever the grouping.
     if (this.moving && !this.moving.addresses.some(address => all.some(row => row.address === address))) this.moving = null;
     // Claude's suggestion is looked at as the spaces it would make: the same list, as it would be.
-    const preview = this.plan && this.plan !== "asking" ? previewOf(listed, spaces(), this.plan, this.skip) : null;
+    const preview = this.plan && this.plan !== "asking" ? previewOf(listed, this.x.spaces(), this.plan, this.skip) : null;
     this.preview = preview;
     this.bySpace = this.groupBy() === "space" || Boolean(this.moving) || Boolean(preview);
     this.byProject = !this.bySpace && this.groupBy() === "project";
-    const sections = groups(preview ? preview.rows : listed, hosts, this.bySpace ? "space" : this.byProject ? "project" : "status", preview ? preview.spaces : spaces())
+    const sections = groups(preview ? preview.rows : listed, hosts, this.bySpace ? "space" : this.byProject ? "project" : "status", preview ? preview.spaces : this.x.spaces())
       .filter(group => cfg.away || !isAway(group));
     const compact = this.width < RAIL;
-    this.expanded = shared(DENSITY_KEY) === "expanded";
+    this.expanded = this.x.shared(DENSITY_KEY) === "expanded";
     // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
     this.single = !hosts.some(host => host.name != null);
     const local = { layout: "loading", ...hosts.find(host => host.name == null), name: null, key: "local", label: "This computer" };
@@ -1249,7 +1284,7 @@ export default class AgentSidebar extends View {
       // Under everything, and only when there is something to close, or to reopen.
       const old = cfg.cleanup ? stale(all, now, cfg.cleanupDays * STALE_SESSION_MS) : [];
       if (old.length) children.push(this.cleanUp(t, old));
-      const closed = (shared(CLOSED_KEY) ?? []).filter(entry => !all.some(row => row.session === entry.session)
+      const closed = (this.x.shared(CLOSED_KEY) ?? []).filter(entry => !all.some(row => row.session === entry.session)
         && hosts.some(host => (host.name ?? null) === (entry.machine ?? null)));
       if (cfg.closed && closed.length) children.push(...this.closedList(t, closed, now));
     }

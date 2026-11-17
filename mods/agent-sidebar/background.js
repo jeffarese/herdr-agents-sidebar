@@ -81,8 +81,8 @@ function doing(s,  at, i) {
 }
 function turn(s,  m, e, u) {
   if (substr(s, length(s)) != "}" || index(s, "\\"isSidechain\\":true")) return ""
-  if (match(s, /"requestedModel":"[][A-Za-z0-9._:@-]+"/)) m = substr(s, RSTART + 18, RLENGTH - 19)
-  else if (match(s, /"message":[{]"model":"[][A-Za-z0-9._:@-]+"/)) m = substr(s, RSTART + 20, RLENGTH - 21)
+  if (match(s, /"requestedModel":"[^" ]+"/)) m = substr(s, RSTART + 18, RLENGTH - 19)
+  else if (match(s, /"message":[{]"model":"[^" ]+"/)) m = substr(s, RSTART + 20, RLENGTH - 21)
   else return ""
   e = "-"
   if (match(s, /"perTurnEffort":"[A-Za-z]+"/)) e = substr(s, RSTART + 17, RLENGTH - 18)

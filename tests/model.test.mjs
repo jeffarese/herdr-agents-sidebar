@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, organizeBrief, organizePlan, activityText, tokens, stale, ended, remember, resumeAction, canReply, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, organizeBrief, organizePlan, latestCodex, organizeAnswer, ORGANIZE_SCHEMA, activityText, tokens, stale, ended, remember, resumeAction, canReply, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -368,4 +368,20 @@ test("small sayings: what a session does or wants, tokens, who can be written to
   assert.deepEqual(resumeAction({ session: "abc-1", cwd: "/w", machine: null }, machines, [{ id: "s1", machine: null, active: true }], null),
     { name: "tab.new", args: { name: undefined, argv: ["claude", "--resume", "abc-1"], folder: "/w", space: "s1" } });
   assert.equal(resumeAction({ session: "x; rm", machine: null }, machines, [], null), null);
+});
+
+test("Codex is given the latest model of a family, from its own list; either one's answer is read", () => {
+  const cache = JSON.stringify({ models: [{ slug: "gpt-6.2-sol", visibility: "list" }, { slug: "gpt-6.1-terra", visibility: "list" }, { slug: "gpt-5.6-terra", visibility: "list" },
+    { slug: "gpt-10-terra", visibility: "list" }, { slug: "gpt-11-terra", visibility: "hide" }, { slug: "gpt-6-luna", visibility: "list" }, { slug: "gpt-6.1-terra-preview" }, { slug: "codex-auto-review" }] });
+  assert.deepEqual(["terra", "sol", "luna", "astra"].map(family => latestCodex(cache, family)), ["gpt-10-terra", "gpt-6.2-sol", "gpt-6-luna", null]);
+  assert.deepEqual([latestCodex("not json", "terra"), latestCodex(null, "terra"), latestCodex("{}", "terra")], [null, null, null]);
+  const answer = { machines: [{ machine: "local", spaces: [] }] };
+  assert.deepEqual(organizeAnswer(JSON.stringify(answer)), answer); // Codex: the answer itself
+  assert.deepEqual(organizeAnswer(JSON.stringify({ structured_output: answer, result: "" })), answer); // Claude Code: in an envelope
+  assert.deepEqual(organizeAnswer(JSON.stringify({ result: JSON.stringify(answer) })), answer);
+  assert.deepEqual([organizeAnswer(""), organizeAnswer("{}"), organizeAnswer("sorry")], [null, null, null]);
+  // Strict, as Codex asks: every object closed, every property required.
+  const closed = schema => schema.type !== "object" ? (schema.items ? closed(schema.items) : true)
+    : schema.additionalProperties === false && Object.keys(schema.properties).every(key => schema.required.includes(key) && closed(schema.properties[key]));
+  assert.ok(closed(ORGANIZE_SCHEMA));
 });

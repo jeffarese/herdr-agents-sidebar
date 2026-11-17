@@ -94,9 +94,15 @@ export function renderSettings(view) {
       .children(UNDER.map(item => toggle(item)))
       .child(choice("set-cleanupDays", "Old means idle for over", [[1, "A day"], [3, "3 days"], [7, "A week"]], cfg.cleanupDays, key => set("cleanupDays", key))
         .when(!cfg.cleanup, el => el.opacity(0.45)))
-      .child(heading("Organize with Claude"))
-      .child(toggle(["organize", "Organize button", "The star in the title bar: asks Claude how to arrange the sessions into spaces, and previews it"]))
-      .child(choice("set-organizeModel", "Model", [["haiku", "Haiku", "Fastest"], ["sonnet", "Sonnet", "The default"], ["opus", "Opus", "Most careful, slowest"]], cfg.organizeModel, key => set("organizeModel", key))
+      .child(heading("Organize with AI"))
+      .child(toggle(["organize", "Organize button", "The star in the title bar: asks how to arrange the sessions into spaces, and previews the answer"]))
+      .child(choice("set-organizeWith", "Ask", [["claude", "Claude Code", "Claude, through the claude command on this computer"], ["codex", "Codex", "A GPT model, through the codex command on this computer"]], cfg.organizeWith, key => set("organizeWith", key))
+        .when(!cfg.organize, el => el.opacity(0.45)))
+      // Each takes the latest model of the family chosen: Claude Code by the family's name,
+      // Codex from its own list of models.
+      .child((cfg.organizeWith === "codex"
+        ? choice("set-organizeCodex", "Model (the latest of)", [["auto", "Auto", "Codex's own default model"], ["luna", "Luna"], ["terra", "Terra", "The default"], ["sol", "Sol"], ["astra", "Astra"]], cfg.organizeCodex, key => set("organizeCodex", key))
+        : choice("set-organizeModel", "Model (the latest of)", [["haiku", "Haiku", "Fastest"], ["sonnet", "Sonnet", "The default"], ["opus", "Opus", "Most careful, slowest"]], cfg.organizeModel, key => set("organizeModel", key)))
         .when(!cfg.organize, el => el.opacity(0.45)))
       .child(choice("set-organizeEffort", "Effort", [["low", "Low"], ["medium", "Medium"], ["high", "High"]], cfg.organizeEffort, key => set("organizeEffort", key))
         .when(!cfg.organize, el => el.opacity(0.45)))

@@ -427,9 +427,32 @@ export const ORGANIZE_SYSTEM = "You organize a developer's terminal sessions int
   + "Keep an existing space and its name when it already fits; name a new one after its project in one to three words. "
   + "Prefer a few meaningful spaces to many with one session each, but never mix unrelated projects. "
   + "Every session goes in exactly one space, on its own machine. Answer only with the structured output.";
-export const ORGANIZE_SCHEMA = { type: "object", required: ["machines"], properties: { machines: { type: "array", items: { type: "object", required: ["machine", "spaces"],
-  properties: { machine: { type: "string" }, spaces: { type: "array", items: { type: "object", required: ["name", "sessions"],
+// Strict, as Codex asks of a schema: every property required, and no others.
+export const ORGANIZE_SCHEMA = { type: "object", additionalProperties: false, required: ["machines"], properties: { machines: { type: "array", items: {
+  type: "object", additionalProperties: false, required: ["machine", "spaces"],
+  properties: { machine: { type: "string" }, spaces: { type: "array", items: { type: "object", additionalProperties: false, required: ["name", "sessions"],
     properties: { name: { type: "string" }, sessions: { type: "array", items: { type: "string" } } } } } } } } } };
+
+// Claude Code takes a family's name for its latest model ("sonnet"). Codex wants the model
+// itself, so the latest of a family ("terra" → "gpt-6.1-terra") is looked up in the list Codex
+// keeps of the models it can use (~/.codex/models_cache.json). Null when it lists none: Codex
+// then uses its own default.
+export function latestCodex(cache, family) {
+  let models;
+  try { models = JSON.parse(cache ?? "")?.models; } catch { return null; }
+  const found = (Array.isArray(models) ? models : []).map(model => {
+    const m = new RegExp(`^gpt-(\\d+)(?:\\.(\\d+))?-${family}$`).exec(model?.visibility === "hide" ? "" : model?.slug ?? "");
+    return m && { slug: model.slug, major: Number(m[1]), minor: Number(m[2] ?? 0) };
+  }).filter(Boolean).sort((a, b) => b.major - a.major || b.minor - a.minor);
+  return found[0]?.slug ?? null;
+}
+// What either one answers: Codex its answer itself, Claude Code an envelope around it.
+export function organizeAnswer(stdout) {
+  try {
+    const out = JSON.parse(stdout);
+    return Array.isArray(out?.machines) ? out : out?.structured_output ?? JSON.parse(out.result);
+  } catch { return null; }
+}
 
 // What Claude is asked, and `ids`: the short id it knows each session by → its address.
 export function organizeBrief(rows, spaces) {
@@ -530,10 +553,11 @@ export const DEFAULTS = {
   folders: true, subagents: true, shells: true, away: true,
   model: true, effort: true, effortColors: true, activity: true, context: true, changes: true, pulls: true, age: true,
   addMachine: true, closed: true, cleanup: true, cleanupDays: 1,
-  organize: true, organizeModel: "sonnet", organizeEffort: "low",
+  organize: true, organizeWith: "claude", organizeModel: "sonnet", organizeCodex: "terra", organizeEffort: "low",
   animations: true,
 };
-const CHOICES = { cleanupDays: [1, 3, 7], organizeModel: ["haiku", "sonnet", "opus"], organizeEffort: ["low", "medium", "high"] };
+const CHOICES = { cleanupDays: [1, 3, 7], organizeWith: ["claude", "codex"], organizeModel: ["haiku", "sonnet", "opus"],
+  organizeCodex: ["auto", "luna", "terra", "sol", "astra"], organizeEffort: ["low", "medium", "high"] };
 // What is saved, over the defaults: anything missing or not one of a setting's values is the default.
 export function settingsOf(saved) {
   const out = { ...DEFAULTS };

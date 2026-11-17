@@ -5,12 +5,15 @@ import { readFileSync } from "node:fs";
 import * as model from "../mods/agent-sidebar/model.js";
 import * as background from "../mods/agent-sidebar/background.js";
 import * as folders from "../mods/agent-sidebar/folders.js";
+import * as demos from "../mods/agent-sidebar/demo.js";
 
 function setup(initial = {}, saved = {}) {
   const commands = [];
   const overlays = [];
   const execs = [];
   const hcs = [];
+  const reads = [];
+  let textFile = null;
   const notes = [];
   let hcResult = { code: 0, stdout: "", stderr: "" };
   let execResult = async () => ({ code: 0, stdout: "", stderr: "" });
@@ -63,7 +66,8 @@ function setup(initial = {}, saved = {}) {
     updates: () => ({ app: { ready: null } }),
     exec: (...args) => { execs.push(args); return execResult(...args); },
     hc: async args => { hcs.push(args); return hcResult; }, notify: note => { notes.push(note); return "n1"; },
-    ...model, ...background, ...folders,
+    readTextFile: async path => { reads.push(path); return textFile; },
+    ...model, ...background, ...folders, demo: demos.demo,
   };
   const launcherSource = readFileSync(new URL("../mods/agent-sidebar/launcher.js", import.meta.url), "utf8").replace(/^import [\s\S]*?;$/gm, "").replace(/export (function|const)/g, "$1");
   Object.assign(imports, new Function(...Object.keys(imports), `${launcherSource}\nreturn { initLauncher, renderLauncher, LAUNCHER };`)(...Object.values(imports)));
@@ -75,7 +79,7 @@ function setup(initial = {}, saved = {}) {
   // GPUI init receives its own props; Herdr supplies overlay props through herdr.props().
   view.init({}, cx);
   const settle = async () => { while (tasks.length) await tasks.shift()(cx); };
-  return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, settle, hcs, notes, hcFails: stderr => { hcResult = { code: 1, stdout: "", stderr }; },
+  return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, settle, hcs, notes, hcFails: stderr => { hcResult = { code: 1, stdout: "", stderr }; }, reads, file: text => { textFile = text; },
     answer: f => { execResult = f; }, agents: list => { agentList = list; }, pick: path => { picked = path; },
     order: () => order, scrollTo: () => scrollTo };
 }
@@ -1478,6 +1482,13 @@ test("the gear's popup is the sidebar's settings: every choice is shared state, 
   // Every switch is there, on by default; a click turns it off, another back on.
   const keys = Object.keys(model.DEFAULTS).filter(key => typeof model.DEFAULTS[key] === "boolean");
   assert.equal(keys.length, 17);
+  // Organize asks Claude Code or Codex, each with the families it has.
+  assert.ok(find(h.view.render(), "set-organizeModel-sonnet") && !find(h.view.render(), "set-organizeCodex-terra"));
+  find(h.view.render(), "set-organizeWith-codex").props.on_click(null, h.cx);
+  assert.equal(find(h.view.render(), "set-organizeCodex-terra").props.aria_selected, true);
+  find(h.view.render(), "set-organizeCodex-sol").props.on_click(null, h.cx);
+  assert.deepEqual([h.sharedState["agent-sidebar.settings"].organizeWith, h.sharedState["agent-sidebar.settings"].organizeCodex], ["codex", "sol"]);
+  find(h.view.render(), "set-organizeWith-claude").props.on_click(null, h.cx);
   for (const key of keys) {
     assert.equal(find(h.view.render(), `set-${key}`).props.aria_selected, true, key);
     find(h.view.render(), `set-${key}`).props.on_click(null, h.cx);
@@ -1575,4 +1586,67 @@ test("each setting changes what the sidebar shows, and what it asks the machines
   root = cfg({ animations: false });
   assert.equal(findStart(root, "slide-"), null);
   assert.equal(find(root, "tint-t3-" + [...h.view.fresh.values()][0]?.at), null);
+});
+
+test("Organize can ask Codex instead: the latest model of the family chosen, read from Codex's own list", async () => {
+  const h = spaced();
+  h.sharedState["agent-sidebar.settings"] = { organizeWith: "codex", organizeEffort: "medium" };
+  h.file(JSON.stringify({ models: [{ slug: "gpt-6.1-terra", visibility: "list" }, { slug: "gpt-5.6-terra", visibility: "list" }, { slug: "gpt-6.2-sol", visibility: "list" }] }));
+  let asked;
+  h.answer(async (cmd, args, opts) => {
+    asked = { cmd, args, opts };
+    const id = title => args.at(-1).match(new RegExp(`- (s\\d+): "${title}"`))[1];
+    return { code: 0, stderr: "", stdout: JSON.stringify({ machines: [{ machine: "local", spaces: [{ name: "Billing", sessions: [id("Rotate keys"), id("Add retries")] }, { name: "API", sessions: [id("Fix login")] }] }] }) };
+  });
+  let root = h.view.render();
+  assert.match(find(root, "organize").props.tooltip, /with Codex \(latest terra, medium effort\)/);
+  find(root, "organize").props.on_click(null, h.cx);
+  assert.match(text(find(h.view.render(), "plan")), /Asking Codex how to arrange them…/);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(h.reads, ["/Users/me/.codex/models_cache.json"]);
+  // The schema first (the script writes it to a file), then the model, the effort and the question.
+  assert.deepEqual([asked.cmd, asked.opts.on, asked.args[1].includes("codex exec"), JSON.parse(asked.args[3]).additionalProperties, asked.args.slice(4, 8)],
+    ["sh", null, true, false, ["-m", "gpt-6.1-terra", "-c", 'model_reasoning_effort="medium"']]);
+  assert.match(asked.args.at(-1), /^You organize a developer's terminal sessions[\s\S]*Machine "local"\. Spaces now: "API", "Billing"/);
+  root = h.view.render();
+  assert.match(text(find(root, "plan")), /Codex's suggestion, previewed below 1 session moves/);
+  assert.equal(text(find(root, "moves-t3")), "from API");
+  find(root, "plan-dismiss").props.on_click(null, h.cx);
+  // "Auto" leaves the model to Codex, and reads nothing; a family Codex doesn't list does too.
+  h.sharedState["agent-sidebar.settings"] = { organizeWith: "codex", organizeCodex: "auto" };
+  find(h.view.render(), "organize").props.on_click(null, h.cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual([h.reads.length, asked.args.slice(4, 6)], [1, ["-c", 'model_reasoning_effort="low"']]);
+  find(h.view.render(), "plan-dismiss")?.props.on_click(null, h.cx);
+  h.sharedState["agent-sidebar.settings"] = { organizeWith: "codex", organizeCodex: "astra" };
+  find(h.view.render(), "organize").props.on_click(null, h.cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual([h.reads.length, asked.args[4]], [2, "-c"]);
+  // No answer names the one that was asked.
+  find(h.view.render(), "plan-dismiss")?.props.on_click(null, h.cx);
+  h.answer(async () => ({ code: 0, stderr: "", stdout: "" }));
+  find(h.view.render(), "organize").props.on_click(null, h.cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.match(h.notes.at(-1).body, /Codex gave no answer\. Is `codex` installed/);
+});
+
+test("the example copy shows example sessions, asks no machine anything, and holds nothing of anyone's", () => {
+  const h = setup({ demo: true });
+  h.view.width = 340;
+  const root = h.view.render();
+  const list = ids(root);
+  for (const id of ["host-local", "host-remote:studio", "host-remote:attic", "section-local:blocked", "agent-t5#a1", "git-t2", "closed", "organize", "settings"]) assert.ok(list.includes(id), id);
+  assert.match(text(find(root, "agent-t1")), /Rotate the API signing keys Asks · Rotate the staging keys too\?/);
+  assert.match(text(find(root, "agent-studio/t1")), /Train the ranking model Bash · Train for 20 epochs Fable/);
+  assert.match(text(find(root, "sessions-count")), /^11$/);
+  // The app's own sessions are not in it, and nothing was run or read.
+  assert.equal(list.includes("agent-work/t1"), false);
+  assert.deepEqual([h.execs.length, h.hcs.length, h.reads.length, h.commands.length, h.view.demo], [0, 0, 0, 0, true]);
+  const all = JSON.stringify([...demos.demo(0).work, demos.demo(0).terminals, demos.demo(0).panes, demos.demo(0).shared]);
+  // Every folder in it is an example's: under /Users/me or /home/me.
+  assert.deepEqual((all.match(/\/(?:Users|home)\/[^/"]+/g) ?? []).filter(home => !["/Users/me", "/home/me"].includes(home)), []);
 });
