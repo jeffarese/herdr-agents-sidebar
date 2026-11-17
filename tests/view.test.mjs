@@ -10,6 +10,9 @@ function setup(initial = {}, saved = {}) {
   const commands = [];
   const overlays = [];
   const execs = [];
+  const hcs = [];
+  const notes = [];
+  let hcResult = { code: 0, stdout: "", stderr: "" };
   let execResult = async () => ({ code: 0, stdout: "", stderr: "" });
   let agentList = [];
   let picked = null;
@@ -59,6 +62,7 @@ function setup(initial = {}, saved = {}) {
     localStorage: storage, shared: key => sharedState[key], setShared: (key, value) => { sharedState[key] = value; },
     updates: () => ({ app: { ready: null } }),
     exec: (...args) => { execs.push(args); return execResult(...args); },
+    hc: async args => { hcs.push(args); return hcResult; }, notify: note => { notes.push(note); return "n1"; },
     ...model, ...background, ...folders,
   };
   const launcherSource = readFileSync(new URL("../mods/agent-sidebar/launcher.js", import.meta.url), "utf8").replace(/^import [\s\S]*?;$/gm, "").replace(/export (function|const)/g, "$1");
@@ -69,7 +73,7 @@ function setup(initial = {}, saved = {}) {
   // GPUI init receives its own props; Herdr supplies overlay props through herdr.props().
   view.init({}, cx);
   const settle = async () => { while (tasks.length) await tasks.shift()(cx); };
-  return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, settle,
+  return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, settle, hcs, notes, hcFails: stderr => { hcResult = { code: 1, stdout: "", stderr }; },
     answer: f => { execResult = f; }, agents: list => { agentList = list; }, pick: path => { picked = path; },
     order: () => order, scrollTo: () => scrollTo };
 }
@@ -935,16 +939,18 @@ test("grouped by space, each space is a heading with its sessions; every copy fo
   assert.equal(h.sharedState["agent-sidebar.group"], "space");
   root = h.view.render();
   assert.equal(find(root, "group").props.aria_selected, true);
+  // What needs you leads; a space with nothing else left keeps its heading.
   assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id),
-    ["section-local:space:s1", "agent-t3", "agent-t1", "section-local:space:s2", "agent-t2", "add-machine"]);
-  assert.match(text(find(root, "section-local:space:s1")), /API 2/);
+    ["section-local:blocked", "agent-t2", "section-local:space:s1", "agent-t3", "agent-t1", "section-local:space:s2", "add-machine"]);
+  assert.match(text(find(root, "section-local:space:s1")), /API\s+2/);
+  assert.match(text(find(root, "section-local:space:s2")), /Billing\s+0/);
   // No heading names the status now, so an idle session carries its ring.
   assert.ok(find(root, "agent-t1").nodes.at(-1).nodes.length > 0);
   // Folded, a space says what it holds.
-  find(root, "section-local:space:s2").props.on_click(null, h.cx);
+  find(root, "section-local:space:s1").props.on_click(null, h.cx);
   root = h.view.render();
-  assert.equal(find(root, "agent-t2"), null);
-  assert.deepEqual(find(root, "section-local:space:s2").nodes.map(n => n.props?.tooltip).filter(Boolean), ["1 needs you"]);
+  assert.equal(find(root, "agent-t3"), null);
+  assert.deepEqual(find(root, "section-local:space:s1").nodes.map(n => n.props?.tooltip).filter(tip => /working|done|needs/.test(tip ?? "")), ["1 working"]);
   find(root, "group").props.on_click(null, h.cx);
   assert.equal(h.sharedState["agent-sidebar.group"], "status");
   assert.ok(find(h.view.render(), "section-local:blocked"));
@@ -976,4 +982,171 @@ test("each reachable machine is asked once what it is, and its heading shows tha
   for (const machine of [null, "work"]) next.view.kinds.set(machine, Date.now() - 61000);
   next.view.askKinds(() => {});
   assert.equal(next.execs.length, 4);
+});
+
+// Two spaces on this computer, one on "work"; t1 and t3 in API, t2 in Billing.
+function spaced() {
+  const h = setup();
+  h.state.spaces = [{ id: "s1", name: "API", machine: null, tabs: [{ id: "a1" }] }, { id: "s2", name: "Billing", machine: null, tabs: [{ id: "b1" }] },
+    { id: "work/s9", name: "Remote", machine: "work", tabs: [{ id: "work/r1" }] }];
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "idle", title: "Fix login", program: { name: "Claude", agent: true } },
+    { address: "t2", state: "live", status: "working", title: "Rotate keys", program: { name: "Claude", agent: true } },
+    { address: "t3", state: "live", status: "working", title: "Add retries", program: { name: "Claude", agent: true } },
+    { address: "work/t1", state: "live", status: "idle", title: "Remote task", program: { name: "Claude", agent: true } },
+  ];
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "a1" }, { pane: "p2", terminal: "t2", tab: "b1" }, { pane: "p3", terminal: "t3", tab: "a1" }, { pane: "work/p1", terminal: "work/t1", tab: "work/r1" }];
+  h.state.focused = null;
+  h.sharedState["agent-sidebar.group"] = "space";
+  return h;
+}
+const hover = (h, id) => { find(h.view.render(), id).props.on_hover(true, h.cx); return h.view.render(); };
+
+test("a space heading starts a session there, renames, recolors and opens Herdr's own menu; a machine starts a new space", () => {
+  const h = spaced();
+  let root = hover(h, "section-local:space:s1");
+  find(root, "space-new-local:space:s1").props.on_click(null, h.cx);
+  assert.deepEqual(h.overlays[0].props, { launcher: true, machine: null, space: "s1" });
+  find(hover(h, "section-local:space:s1"), "space-more-local:space:s1").props.on_click(null, h.cx);
+  const menu = { mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: "s1" } } };
+  assert.deepEqual(h.overlays[1], menu);
+  root = h.view.render();
+  find(root, "section-local:space:s1").props.on_mouse_down[1](); // the last one set: the left press
+  assert.equal(h.overlays.length, 2);
+  // Double-click renames (Herdr asks for the name) and leaves the fold as it was.
+  find(root, "section-local:space:s1").props.on_click({ click_count: 1 }, h.cx);
+  find(h.view.render(), "section-local:space:s1").props.on_click({ click_count: 2 }, h.cx);
+  assert.deepEqual(h.commands, [{ name: "space.rename", args: { id: "s1" } }]);
+  assert.ok(find(h.view.render(), "agent-t1"));
+  // The dot cycles Herdr's own colors for the space.
+  find(h.view.render(), "color-local:space:s1").props.on_click(null, h.cx);
+  assert.deepEqual(h.sharedState["space.colors"], { s1: "ansi3" });
+  find(h.view.render(), "color-local:space:s1").props.on_click(null, h.cx);
+  assert.deepEqual(h.sharedState["space.colors"], { s1: "ansi4" });
+  // No actions on "Needs you" or "No space".
+  h.state.terminals[0].status = "blocked";
+  assert.equal(find(hover(h, "section-local:blocked"), "space-new-local:blocked"), null);
+  // Each machine's heading starts a new space there, only while grouped by space.
+  find(h.view.render(), "new-space-remote:work").props.on_click(null, h.cx);
+  assert.deepEqual(h.commands.at(-1), { name: "space.new", args: { machine: "work" } });
+  h.sharedState["agent-sidebar.group"] = "status";
+  assert.equal(find(h.view.render(), "new-space-remote:work"), null);
+});
+
+test("a space's + opens the launcher on that space, whatever folder is picked", () => {
+  const h = setup({ launcher: true, machine: null, space: "s2" });
+  h.state.spaces = [{ id: "s1", name: "API", machine: null, active: true, tabs: [] }, { id: "s2", name: "Billing", machine: null, tabs: [] }];
+  h.state.focused = { space: "s1" };
+  h.input.handlers.submit();
+  assert.equal(h.commands.at(-1).name, "tab.new");
+  assert.equal(h.commands.at(-1).args.space, "s2");
+});
+
+test("moving a session: its row's button, then a click on a space; its pane is parked, then it is labeled into the space", async () => {
+  const h = spaced();
+  h.sharedState["agent-sidebar.group"] = "status"; // choosing where shows the spaces anyway
+  let root = hover(h, "agent-t1");
+  find(root, "move-t1").props.on_click(null, h.cx);
+  root = h.view.render();
+  assert.match(text(find(root, "moving")), /Move Fix login to…/);
+  // Its own space and another machine's are no destination; the other space says "Move here".
+  assert.doesNotMatch(text(find(root, "section-local:space:s1")), /Move here/);
+  assert.doesNotMatch(text(find(root, "section-remote:work:space:work/s9")), /Move here/);
+  assert.match(text(find(root, "section-local:space:s2")), /Move here/);
+  find(root, "section-local:space:s1").props.on_click({ click_count: 1 }, h.cx); // folds, moves nothing
+  assert.deepEqual(h.commands, []);
+  find(h.view.render(), "section-local:space:s2").props.on_click({ click_count: 1 }, h.cx);
+  assert.deepEqual(h.commands, [{ name: "terminal.park", args: { terminal: "t1" } }]);
+  assert.equal(h.view.moving, null);
+  // Until its pane is gone nothing is labeled; the row stays, dimmed, and doesn't "leave".
+  h.view.finishMoves();
+  assert.equal(h.hcs.length, 0);
+  h.state.panes = h.state.panes.filter(pane => pane.terminal !== "t1");
+  root = h.view.render();
+  assert.equal(find(root, "agent-t1").props.opacity, 0.5);
+  h.view.finishMoves();
+  assert.equal(h.hcs.length, 1);
+  assert.deepEqual(h.hcs[0].slice(0, 3), ["label", "t1", "herdr.space=s2"]);
+  assert.match(h.hcs[0][3], /^herdr\.tab=tb[0-9a-f]{32}$/);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual([h.notes[0].title, h.notes[0].level], ["Moved Fix login to Billing", "success"]);
+  assert.equal(h.view.pending.length, 0);
+  // Escape, or Cancel, leaves a move without moving.
+  find(hover(h, "agent-t3"), "move-t3").props.on_click(null, h.cx);
+  h.view.render().props.on_key_down({ key: "escape" }, h.cx);
+  assert.equal(h.view.moving, null);
+  assert.equal(h.commands.length, 1);
+  find(hover(h, "agent-t3"), "move-t3").props.on_click(null, h.cx);
+  find(h.view.render(), "moving-cancel").props.on_click(null, h.cx);
+  assert.equal(find(h.view.render(), "moving"), null);
+  // A sub-agent inside a session, and a session on a machine with one space, have no button.
+  assert.equal(find(hover(h, "agent-work/t1"), "move-work/t1"), null);
+});
+
+test("a move that can't finish says what state the session is in", async () => {
+  const h = spaced();
+  const start = address => { find(hover(h, `agent-${address}`), `move-${address}`).props.on_click(null, h.cx); find(h.view.render(), "section-local:space:s2").props.on_click({ click_count: 1 }, h.cx); };
+  // Its pane never closes: given up after a while, nothing changed.
+  start("t1");
+  h.view.pending[0].at = Date.now() - 9000;
+  h.view.finishMoves();
+  assert.equal(h.hcs.length, 0);
+  assert.deepEqual([h.notes[0].title, h.notes[0].body, h.notes[0].level], ["Could not move Fix login", "Its pane did not close. Nothing was changed.", "warning"]);
+  // Parked, but the label fails: it runs on without a pane, and the toast says where it is.
+  h.hcFails("no such terminal");
+  start("t3");
+  h.state.panes = h.state.panes.filter(pane => pane.terminal !== "t3");
+  h.view.finishMoves();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.match(h.notes[1].body, /still running, without a pane: find it under No space\. no such terminal/);
+  assert.ok(find(h.view.render(), "agent-t3")); // still listed
+});
+
+test("merging: a space's sessions all move to the space clicked next", () => {
+  const h = spaced();
+  find(hover(h, "section-local:space:s1"), "space-merge-local:space:s1").props.on_click(null, h.cx);
+  const root = h.view.render();
+  assert.match(text(find(root, "moving")), /Move all of API to…/);
+  find(root, "section-local:space:s2").props.on_click({ click_count: 1 }, h.cx);
+  assert.deepEqual(h.commands, [{ name: "terminal.park", args: { terminal: "t3" } }, { name: "terminal.park", args: { terminal: "t1" } }]);
+  assert.deepEqual(h.view.pending.map(move => [move.address, move.space]), [["t3", "s2"], ["t1", "s2"]]);
+});
+
+test("dragging a session onto a space moves it; dragging a space onto another reorders; neither is a click", () => {
+  const h = spaced();
+  const press = (root, id) => { const down = find(root, id).props.on_mouse_down; (Array.isArray(down[0]) ? down[0] : down)[1](); };
+  let root = h.view.render();
+  find(root, "agent-t1").props.on_mouse_down[1]();
+  find(root, "section-local:space:s2").props.on_mouse_move(null, h.cx);
+  root = h.view.render();
+  assert.match(text(find(root, "section-local:space:s2")), /Move here/); // the drag shows where it can go
+  find(root, "section-local:space:s2").props.on_mouse_up[1](null, h.cx);
+  assert.deepEqual(h.commands, [{ name: "terminal.park", args: { terminal: "t1" } }]);
+  // Dropped anywhere else, nothing moves and the move is over.
+  root = h.view.render();
+  find(root, "agent-t3").props.on_mouse_down[1]();
+  find(root, "agent-t2").props.on_mouse_move(null, h.cx);
+  find(h.view.render(), "agent-t2").props.on_mouse_up[1](null, h.cx);
+  assert.equal(h.view.moving, null);
+  assert.equal(h.commands.length, 1);
+  // A press that left the row and came back opens nothing; a plain click still does.
+  root = h.view.render();
+  find(root, "agent-t3").props.on_mouse_down[1]();
+  find(root, "agent-t2").props.on_mouse_move(null, h.cx);
+  find(root, "agent-t3").props.on_mouse_move(null, h.cx);
+  find(root, "agent-t3").props.on_mouse_up[1](null, h.cx);
+  find(h.view.render(), "agent-t3").props.on_click();
+  assert.equal(h.commands.length, 1);
+  root = h.view.render();
+  find(root, "agent-t3").props.on_mouse_down[1]();
+  find(root, "agent-t3").props.on_mouse_up[1](null, h.cx);
+  find(root, "agent-t3").props.on_click();
+  assert.deepEqual(h.commands.at(-1), { name: "pane.focus", args: { pane: "p3" } });
+  // A space dragged onto another takes its place, as in Herdr's own Spaces list.
+  root = h.view.render();
+  find(root, "section-local:space:s2").props.on_mouse_down[1]();
+  find(root, "section-local:space:s1").props.on_mouse_move(null, h.cx);
+  find(h.view.render(), "section-local:space:s1").props.on_mouse_up[1](null, h.cx);
+  assert.deepEqual(h.commands.at(-1), { name: "space.move", args: { id: "s2", index: 1 } });
+  void press;
 });

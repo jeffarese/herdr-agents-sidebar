@@ -171,9 +171,11 @@ export function holdDone(rows, before) {
 // render); `placed`: the terminals that had a pane then, `now` those that have one now. A terminal
 // still listed after LEAVE_MS stayed on purpose (parked) and comes back. Changes `leaving`.
 export const LEAVE_MS = 2500;
-export function dropLeaving(rows, leaving, placed, panes, now = Date.now()) {
+// `staying`: sessions whose pane went on purpose (one being moved to another space).
+export function dropLeaving(rows, leaving, placed, panes, now = Date.now(), staying = new Set()) {
   const present = new Set(rows.map(row => row.address));
-  for (const address of placed) if (!panes.has(address) && present.has(address) && !leaving.has(address)) leaving.set(address, now);
+  for (const address of placed) if (!panes.has(address) && present.has(address) && !leaving.has(address) && !staying.has(address)) leaving.set(address, now);
+  for (const address of staying) leaving.delete(address);
   for (const [address, at] of leaving) if (!present.has(address) || now - at > LEAVE_MS) leaving.delete(address);
   return leaving.size ? rows.filter(row => !leaving.has(row.inner ? row.terminal : row.address)) : rows;
 }
@@ -219,7 +221,8 @@ export function sectionOf(row, status = row.status) {
 // when the parent is listed too, and lift the parent into their most urgent section.
 // `by`: "status" (the sections above), or "space": a section for each of Herdr's spaces, in
 // Herdr's order, its sessions by urgency; one outside any space comes last.
-export function sectionize(rows, by = "status") {
+// `spaces`: that host's spaces, so one with no session still has its heading.
+export function sectionize(rows, by = "status", spaces = []) {
   const listed = new Set(rows.map(row => row.address));
   const kids = new Map();
   for (const row of rows) {
@@ -234,17 +237,22 @@ export function sectionize(rows, by = "status") {
     return [{ row, depth }, ...(kids.get(row.address) ?? []).flatMap(kid => tree(kid, depth + 1))];
   };
   // Each section holds trees (a session and its sub-agents), in priority order.
-  const spaces = new Map();
+  const held = new Map(by === "space" ? spaces.map((space, i) => [`space:${space.id}`, { id: `space:${space.id}`, label: space.name || "Space", status: null, space: space.id, order: i - spaces.length, trees: [] }]) : []);
   const out = new Map(SECTIONS.map(section => [section.id, []]));
   // Roots first; anything left over (a parent cycle) is listed on its own.
   const roots = rows.filter(row => !row.parent || !listed.has(row.parent) || row.parent === row.address);
   for (const row of [...roots, ...rows]) {
     if (seen.has(row.address)) continue;
     const entries = tree(row, 0);
+    // Whatever the grouping, what needs you leads: it must not wait inside a space.
+    if (by === "space" && Math.max(...entries.map((entry, i) => urgency(entry.row, i > 0))) === URGENT.blocked) {
+      out.get("blocked").push(entries);
+      continue;
+    }
     if (by === "space") {
       const id = `space:${row.spaceId ?? ""}`;
-      if (!spaces.has(id)) spaces.set(id, { id, label: row.spaceId ? row.space || "Space" : "No space", status: null, space: row.spaceId, order: row.spaceOrder, trees: [] });
-      spaces.get(id).trees.push(entries);
+      if (!held.has(id)) held.set(id, { id, label: row.spaceId ? row.space || "Space" : "No space", status: null, space: row.spaceId, order: row.spaceOrder, trees: [] });
+      held.get(id).trees.push(entries);
       continue;
     }
     const top = Math.max(...entries.map((entry, i) => urgency(entry.row, i > 0)));
@@ -252,7 +260,8 @@ export function sectionize(rows, by = "status") {
     out.get(sectionOf(row, status)).push(entries);
   }
   if (by === "space") {
-    return [...spaces.values()].sort((a, b) => a.order - b.order || a.label.localeCompare(b.label)).map(({ trees, order, ...section }) => {
+    const lead = out.get("blocked").length ? [{ ...SECTIONS[0], trees: out.get("blocked") }] : [];
+    return [...lead, ...[...held.values()].sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))].map(({ trees, order, ...section }) => {
       const folders = byFolder(trees);
       return { ...section, folders, entries: folders.flatMap(folder => folder.entries) };
     });
@@ -296,14 +305,14 @@ function byFolder(trees) {
 
 // Each machine's sessions. This computer first, then the machines that can be reached, by name,
 // then the ones that can't: those have nothing to act on, so they wait at the end.
-export function groups(rows, machines, by = "status") {
+export function groups(rows, machines, by = "status", spaces = []) {
   const hosts = [...machines];
   if (!hosts.some(m => m.name == null)) hosts.push({ name: null, layout: "loading" });
   const rank = host => host.name == null ? 0 : host.layout === "unavailable" ? 2 : 1;
   hosts.sort((a, b) => rank(a) - rank(b) || (a.name ?? "").localeCompare(b.name ?? ""));
   return hosts.map(host => {
     const mine = rows.filter(row => row.machine === (host.name ?? null));
-    const sections = sectionize(mine, by);
+    const sections = sectionize(mine, by, spaces.filter(space => (space.machine ?? null) === (host.name ?? null)));
     return {
       ...host, key: host.name == null ? "local" : `remote:${host.name}`,
       label: host.name ?? "This computer", remote: host.name != null,
@@ -361,6 +370,17 @@ export function openAction(row) {
 export function closeAction(row) {
   if (!row?.available || row.inner) return null;
   return row.pane ? { name: "pane.close", args: { pane: row.pane } } : { name: "terminal.kill", args: { terminal: row.address } };
+}
+
+// Moving a session to another space of its machine. Herdr has no command for it, but shows a
+// terminal wherever its labels say: so its pane is parked (terminal.park; it keeps running),
+// and then `hc` is given these arguments, which make it a new tab of that space. A space lives
+// on one machine, and so does a session; a sub-agent inside a session can't move by itself.
+export const canMove = (row, space) => Boolean(row?.available && !row.inner && space && machineOf(space) === row.machine && row.spaceId !== space);
+export function moveArgs(row, space, tab) {
+  // Labels use the machine's own ids: without the "<machine>/" the app puts before them.
+  const local = id => row.machine == null ? id : id.slice(row.machine.length + 1);
+  return ["label", row.address, `herdr.space=${local(space)}`, `herdr.tab=${tab}`];
 }
 
 // Never use the active host implicitly: a local + must stay local while a remote tab is focused.

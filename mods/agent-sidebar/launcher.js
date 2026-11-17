@@ -18,6 +18,8 @@ const PROGRAMS_SHOWN = 6;
 export function initLauncher(view, initial, cx) {
   view.machine = initial.machine ?? null;
   view.key = machineKey(view.machine);
+  // A space's own +: the session joins that space, whatever its folder.
+  view.space = initial.space ?? null;
   view.chosen = initial.folder ? { path: initial.folder, tag: initial.tag ?? "Picked" } : null;
   view.query = "";
   view.index = 0;
@@ -112,8 +114,9 @@ function current(view) {
   const index = Math.min(view.index, Math.max(0, folders.length - 1));
   const folder = folders[index] ?? null;
   const { match, fallback } = placement(folder?.path, view.machine, spaces(), panes(), focused());
-  const tabSpace = match ?? fallback;
-  const where = !tabSpace ? "space" : view.where ?? (match ? "tab" : "space");
+  const asked = view.space ? spaces().find(space => space.id === view.space) ?? null : null;
+  const tabSpace = asked ?? match ?? fallback;
+  const where = !tabSpace ? "space" : view.where ?? (asked || match ? "tab" : "space");
   return { path, folders, index, folder, tabSpace, where };
 }
 

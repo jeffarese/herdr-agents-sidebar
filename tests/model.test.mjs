@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, modelName, fitWhere, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -104,11 +104,20 @@ test("grouped by space, each of Herdr's spaces is a section in Herdr's order, it
   const rows = build(world({ machines: [{ name: null, layout: "ready" }], terminals, panes, spaces }));
   const sections = sectionize(rows, "space");
   assert.deepEqual(sections.map(s => [s.id, s.label, s.space, s.entries.map(e => e.row.address)]), [
+    ["blocked", "Needs you", undefined, ["t2"]], // what needs you leads, whatever its space
     ["space:s2", "Billing", "s2", ["t3", "t6"]],
-    ["space:s1", "API", "s1", ["t2", "t1", "t5"]], // a sub-agent stays under its session
+    ["space:s1", "API", "s1", ["t1", "t5"]], // a sub-agent stays under its session
     ["space:", "No space", null, ["t4"]],
   ]);
-  assert.deepEqual(groups(rows, [{ name: null, layout: "ready" }], "space")[0].sections.map(s => s.label), ["Billing", "API", "No space"]);
+  // Given the machine's spaces, one with no session (or none left outside Needs you) keeps its heading.
+  const all = [...spaces, { id: "s3", name: "Empty" }, { id: "work/s9", name: "Elsewhere", machine: "work" }];
+  assert.deepEqual(groups(rows, [{ name: null, layout: "ready" }], "space", all)[0].sections.map(s => [s.label, s.entries.length]),
+    [["Needs you", 1], ["Billing", 2], ["API", 2], ["Empty", 0], ["No space", 1]]);
+  // A session moves to another space of its own machine, by its labels, in that machine's ids.
+  const row = address => rows.find(r => r.address === address);
+  assert.deepEqual([canMove(row("t1"), "s2"), canMove(row("t1"), "s1"), canMove(row("t1"), "work/s9"), canMove(row("t4"), "s1"), canMove(null, "s1")], [true, false, false, true, false]);
+  assert.deepEqual(moveArgs(row("t1"), "s2", "tbnew"), ["label", "t1", "herdr.space=s2", "herdr.tab=tbnew"]);
+  assert.deepEqual(moveArgs({ address: "work/t7", machine: "work" }, "work/s9", "tbnew"), ["label", "work/t7", "herdr.space=s9", "herdr.tab=tbnew"]);
   // By status is unchanged.
   assert.deepEqual(sectionize(rows).map(s => s.id), ["blocked", "working", "idle"]);
 });

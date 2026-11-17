@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, canMove, moveArgs, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
 import { PROBE, PROBE_MS, KIND, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
@@ -33,6 +33,11 @@ const GROUP_KEY = "agent-sidebar.group";
 const KINDS_KEY = "agent-sidebar.kinds";
 const KIND_ICON = { laptop: "laptop", desktop: "computer", server: "server" };
 const KIND_RETRY_MS = 60000;
+// A space's color, as Herdr's own Spaces list keeps and cycles it.
+const SPACE_COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
+// A session being moved has this long to lose its pane before the move is given up.
+const MOVE_MS = 8000;
+const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
 // Sessions under a folder heading sit this much further in.
 const GROUPED_INDENT = 10;
 // A status change: the new mark fades and slides in; news that wants you (Needs you, Done)
@@ -70,6 +75,14 @@ export default class AgentSidebar extends View {
     this.folded = new Set(store.get("folded", []));
     // Unreachable hosts whose sessions were asked for. Not kept: once back, a host is as it was.
     this.revealed = new Set();
+    // Moving sessions to another space. `moving`: { addresses, title, from, machine } while a
+    // space is being chosen; `pending`: moves under way; `drag`: a press that may become one.
+    this.moving = null;
+    this.pending = [];
+    // Sessions parked by a move, until Herdr shows them in their new space: not "leaving".
+    this.parked = new Set();
+    this.drag = null;
+    this.hoveredSection = null;
     // address → the status each row was shown with, and the changes still animating.
     this.shown = null;
     this.fresh = new Map();
@@ -119,10 +132,11 @@ export default class AgentSidebar extends View {
       for (;;) {
         this.probe(() => wake());
         this.askKinds(() => wake());
-        // A second, or less when an answer arrives.
-        await Promise.race([cx.sleep(1000), new Promise(resolve => { wake = resolve; })]);
+        this.finishMoves();
+        // A second, or less when an answer arrives or a move is under way.
+        await Promise.race([cx.sleep(this.pending.length ? 250 : 1000), new Promise(resolve => { wake = resolve; })]);
         // A session held back as leaving comes back if it is still there after LEAVE_MS.
-        if (this.changed || this.leaving.size) {
+        if (this.changed || this.leaving.size || this.pending.length) {
           this.changed = false;
           cx.notify();
         }
@@ -239,7 +253,7 @@ export default class AgentSidebar extends View {
       if (key) ys.set(key, y);
       y += heights[i];
     });
-    const view = [this.expanded, this.bySpace, this.width, this.single, compact].join("|");
+    const view = [this.expanded, this.bySpace, Boolean(this.moving), this.width, this.single, compact].join("|");
     if (this.ys && this.view === view && !compact) {
       for (const [key, now_] of ys) {
         const was = this.ys.get(key);
@@ -275,6 +289,103 @@ export default class AgentSidebar extends View {
       .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
       .on_click((_e, cx) => { this.toggleDensity(); cx.notify(); })
       .child(glyph("rows", 15));
+  }
+
+  // Choosing where sessions go: every space they can go to takes the next click (or the drop).
+  // `from`: the space they are in, which is no destination.
+  startMove(rows, title, from, dragged = false) {
+    const movable = rows.filter(row => row.available && !row.inner);
+    if (!movable.length) return;
+    this.moving = { addresses: movable.map(row => row.address), title, from, machine: movable[0].machine, dragged };
+  }
+
+  // Parks each session's pane; finishMoves() labels it into the space once the pane is gone.
+  moveTo(space) {
+    const moving = this.moving;
+    this.moving = null;
+    this.drag = null;
+    for (const address of moving?.addresses ?? []) {
+      const row = (this.rows ?? []).find(row => row.address === address);
+      if (!canMove(row, space) || this.pending.some(move => move.address === address)) continue;
+      this.pending.push({ address, row, space, at: Date.now() });
+      if (row.pane) run("terminal.park", { terminal: address });
+    }
+  }
+
+  finishMoves() {
+    if (!this.pending.length) return;
+    const placed = new Set(panes().filter(pane => pane.terminal).map(pane => pane.terminal));
+    const now = Date.now();
+    for (const move of this.pending.slice()) {
+      const gone = !placed.has(move.address);
+      if (!gone && now - move.at < MOVE_MS) continue;
+      this.pending.splice(this.pending.indexOf(move), 1);
+      const name = spaces().find(space => space.id === move.space)?.name ?? "the space";
+      // Still there: nothing was changed. Parked but not labeled: it runs on without a pane,
+      // listed here under "No space", where a click peeks at it.
+      const failed = body => notify({ title: `Could not move ${move.row.title}`, body, level: "warning" });
+      if (!gone) { failed("Its pane did not close. Nothing was changed."); continue; }
+      this.parked.add(move.address);
+      hc(moveArgs(move.row, move.space, `tb${hex(32)}`)).then(result => {
+        if (result.code !== 0) failed(`It is still running, without a pane: find it under No space. ${String(result.stderr ?? "").trim().slice(0, 120)}`);
+        else notify({ title: `Moved ${move.row.title} to ${name}`, level: "success", timeout: 2500 });
+      }).catch(() => failed("It is still running, without a pane: find it under No space."));
+    }
+  }
+
+  recolor(space) {
+    const colors = shared("space.colors") ?? {};
+    const next = SPACE_COLORS[(SPACE_COLORS.indexOf(colors[space] ?? SPACE_COLORS[0]) + 1) % SPACE_COLORS.length];
+    setShared("space.colors", { ...colors, [space]: next });
+  }
+
+  // Herdr's own menu for a space: Rename, its worktrees, Close (which Herdr confirms).
+  spaceMenu(space) {
+    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space } } });
+  }
+
+  // A press on a row or a space heading that moves onto another element is a drag: a session
+  // dragged onto a space moves there; a space dragged onto another takes its place in the order.
+  press(drag) {
+    this.drag = this.moving ? null : { ...drag, over: drag.home, moved: false };
+  }
+
+  dragOver(key, cx) {
+    const drag = this.drag;
+    if (!drag || drag.over === key) return;
+    drag.over = key;
+    drag.moved = true;
+    if (drag.row && !this.moving) this.startMove([drag.row], drag.row.title, drag.row.spaceId, true);
+    cx.notify();
+  }
+
+  // The release. On a space heading (`section`): the drop. Anywhere else: the drag is over.
+  release(cx, group = null, section = null) {
+    const drag = this.drag;
+    this.drag = null;
+    if (!drag?.moved) return;
+    // A press that left and came back is no click.
+    this.dragged = drag.home;
+    const space = section?.space || null;
+    if (drag.row && space && this.isTarget(group, section)) this.moveTo(space);
+    else if (drag.row && this.moving?.dragged) this.moving = null;
+    else if (drag.space && space && space !== drag.space && drag.machine === (group.name ?? null)) {
+      const index = spaces().findIndex(other => other.id === space);
+      if (index !== -1) run("space.move", { id: drag.space, index: index + 1 });
+    }
+    cx.notify();
+  }
+
+  // A click that ended a drag does nothing.
+  clicked(home) {
+    const dragged = this.dragged === home;
+    this.dragged = null;
+    return !dragged;
+  }
+
+  isTarget(group, section) {
+    const moving = this.moving;
+    return Boolean(moving && section.space && section.space !== moving.from && moving.machine === (group.name ?? null));
   }
 
   toggleGroup() {
@@ -471,6 +582,19 @@ export default class AgentSidebar extends View {
         cx.notify();
       })
       .child(glyph("plus", 13));
+    // To another space: every space it can go to then takes the click.
+    const others = !row.inner && spaces().filter(space => (space.machine ?? null) === row.machine && space.id !== row.spaceId).length > 0;
+    const move = div().id(`move-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
+      .role("button").accessibility_label(`Move ${row.title} to another space`)
+      .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Move to another space · or drag it onto one")
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.startMove([row], row.title, row.spaceId);
+        this.hovered = null;
+        cx.notify();
+      })
+      .child(glyph("move", 12));
     // Closing takes two deliberate clicks: the first turns ✕ into a red Close, the second closes.
     // A stray click, or a double click, on a row's right end never ends a session.
     const armed = this.armed?.address === row.address && Date.now() - this.armed.at < ARMED_MS;
@@ -523,7 +647,11 @@ export default class AgentSidebar extends View {
         if (!inside && this.armed?.address === row.address) this.armed = null;
         cx.notify();
       })
-      .tooltip(tip).on_click(() => this.open(row))
+      .tooltip(tip).on_click(() => { if (this.clicked(`row:${row.address}`)) this.open(row); })
+      .when(row.available && !row.inner, el => el.on_mouse_down("left", () => this.press({ row, home: `row:${row.address}` })))
+      .on_mouse_move((_e, cx) => this.dragOver(`row:${row.address}`, cx))
+      .on_mouse_up("left", (_e, cx) => this.release(cx))
+      .when(this.moving?.addresses.includes(row.address) || this.pending.some(move => move.address === row.address), el => el.opacity(0.5))
       .when(Boolean(tint), el => el.child(tint))
       .when(Boolean(row.parent), el => el.child(glyph("sub", 11).ml(-2).mr(-4).text_color(t.dim)))
       .child(this.program(t, row, expanded ? 18 : 16))
@@ -531,6 +659,7 @@ export default class AgentSidebar extends View {
       .when(row.pinned && section !== "pinned" && !pinning, el => el.child(glyph("pin", 11).text_color(t.dim)))
       .when(goal, el => el.child(div().id(`goal-${row.address}`).flex_none().tooltip(`Goal: ${row.goal.condition}`)
         .child(glyph("goal", 11).text_color(t.dim))))
+      .when(pinning && !armed && others, el => el.child(move))
       .when(pinning && !armed && Boolean(row.cwd), el => el.child(here))
       .when(pinning && !armed, el => el.child(pin))
       .when(pinning, el => el.child(close))
@@ -557,20 +686,55 @@ export default class AgentSidebar extends View {
     const color = section.status ? t[section.status] : t.muted;
     // Sessions: a session's own sub-agents are part of it.
     const n = section.entries.filter(entry => !entry.row.inner).length;
-    // A space's own color, as Herdr's tabs show it; folded, what it holds.
-    const tint = section.space ? shared("space.colors")?.[section.space] : null;
-    const dot = tint ? t[tint] : null;
+    // One of Herdr's spaces (not "No space"): it has Herdr's color, and things to do with it.
+    const space = section.space || null;
+    const dot = space ? t[shared("space.colors")?.[space] ?? SPACE_COLORS[0]] : null;
+    // While sessions are being moved, a space they can go to says so and takes the click.
+    const target = this.isTarget(group, section);
+    const hovered = this.hoveredSection === key && Boolean(space) && !this.moving;
+    const act = (id, icon, tip, action) => div().id(`${id}-${key}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
+      .role("button").accessibility_label(`${tip}: ${section.label}`).cursor_pointer().text_color(t.muted)
+      .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_click((_e, cx) => { cx.stop_propagation(); this.hoveredSection = null; action(); cx.notify(); })
+      .child(glyph(icon, 12));
+    const rows = section.entries.map(entry => entry.row);
     return h_flex().id(`section-${key}`).h(HEIGHT.section).flex_none().pl(10).pr(8).gap(6).items_center()
-      .role("button").accessibility_label(`${section.label}, ${n} ${n === 1 ? "session" : "sessions"}, ${open ? "expanded" : "collapsed"}`)
+      .role("button").accessibility_label(target ? `Move ${this.moving.title} to ${section.label}`
+        : `${section.label}, ${n} ${n === 1 ? "session" : "sessions"}, ${open ? "expanded" : "collapsed"}`)
       .cursor_pointer().rounded(5).text_size(10.5).font_medium()
+      .when(target, el => el.bg(t.selected).tooltip(`Move ${this.moving.title} here`))
+      .when(Boolean(space) && !target, el => el.tooltip("Double-click to rename · right-click for more · drag to reorder"))
       .hover(s => s.bg(t.hover))
-      .on_click((_e, cx) => this.toggle(key, cx))
-      .when(Boolean(dot), el => el.child(div().size(6).flex_none().rounded(3).bg(dot)))
-      .child(div().min_w(0).truncate().text_color(color).child(section.label))
+      .on_hover((inside, cx) => {
+        if (inside) this.hoveredSection = key;
+        else if (this.hoveredSection === key) this.hoveredSection = null;
+        cx.notify();
+      })
+      .on_click((e, cx) => {
+        if (!this.clicked(`section:${key}`)) return;
+        if (target) { this.moveTo(space); cx.notify(); return; }
+        // The second click of a double one: the first folded it, this unfolds it again.
+        if (space && e?.click_count === 2) run("space.rename", { id: space });
+        this.toggle(key, cx);
+      })
+      .when(Boolean(space), el => el
+        .on_mouse_down("right", () => this.spaceMenu(space))
+        .on_mouse_down("left", () => this.press({ space, machine: group.name ?? null, home: `section:${key}` })))
+      .on_mouse_move((_e, cx) => this.dragOver(`section:${key}`, cx))
+      .on_mouse_up("left", (_e, cx) => this.release(cx, group, section))
+      .when(Boolean(dot), el => el.child(div().id(`color-${key}`).size(8).flex_none().rounded(4).bg(dot).cursor_pointer().tooltip("Change color")
+        .on_click((_e, cx) => { cx.stop_propagation(); this.recolor(space); cx.notify(); })))
+      .child(div().min_w(0).truncate().text_color(target ? t.foreground : color).child(section.label))
       .child(div().flex_none().text_color(t.dim).child(String(n)))
       .child(div().flex_1())
-      .when(Boolean(section.space !== undefined) && !open, el => el.children(this.summary(t, { rows: section.entries.map(entry => entry.row) })))
-      .child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim));
+      .when(target, el => el.child(div().flex_none().text_size(10).text_color(t.accent).child("Move here")))
+      .when(section.space !== undefined && !open && !target && !hovered, el => el.children(this.summary(t, { rows })))
+      .when(hovered, el => el
+        .child(act("space-new", "plus", "New shell or agent in this space", () => this.launch(group.name ?? null, { space })))
+        .when(n > 0 && spaces().some(other => (other.machine ?? null) === (group.name ?? null) && other.id !== space),
+          el => el.child(act("space-merge", "merge", "Move all its sessions to another space", () => this.startMove(rows, `all of ${section.label}`, space))))
+        .child(act("space-more", "more", "Rename, worktrees, close", () => this.spaceMenu(space))))
+      .when(!hovered, el => el.child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim)));
   }
 
   // What a folded host holds, by urgency: "! 2  ◌ 3  ✓ 1".
@@ -605,6 +769,7 @@ export default class AgentSidebar extends View {
     const color = group.remote ? t.ansi4 : t.accent;
     const state = hostState(group);
     const add = this.newButton(t, group);
+    const space = this.bySpace && !state ? this.newSpaceButton(t, group) : null;
     const kind = shared(KINDS_KEY)?.[group.name ?? ""];
     const icon = KIND_ICON[kind] ?? (group.remote ? "server" : "computer");
     const label = `${group.remote ? "Remote" : "Local"} host ${group.label}, ${counts(group.rows).all} sessions${state ? `, ${state}` : ""}, ${open ? "expanded" : "collapsed"}`;
@@ -614,6 +779,7 @@ export default class AgentSidebar extends View {
       .on_click((_e, cx) => this.toggle(group.key, cx));
     if (compact) return root.h(30).px(6).gap(4).justify_center().when(!first, el => el.mt(4).border_t(1).border_color(t.border))
       .child(glyph(icon, 14).text_color(color)).child(add);
+    // Grouped by space, a machine's heading also starts a new space there.
     return root.h(HEIGHT.host + (state ? HEIGHT.hostState : 0)).px(8).gap(8).rounded(6)
       .when(!first, el => el.mt(HEIGHT.hostGap))
       .hover(s => s.bg(t.hover))
@@ -626,7 +792,16 @@ export default class AgentSidebar extends View {
         .when(Boolean(state), el => el.child(div().text_size(10).text_color(group.layout === "loading" ? t.muted : t.blocked).child(state))))
       .when(!open, el => el.children(this.summary(t, group)))
       .child(div().flex_none().min_w(14).text_size(10.5).text_color(t.muted).text_right().child(String(counts(group.rows).all)))
+      .when(Boolean(space), el => el.child(space))
       .child(add);
+  }
+
+  newSpaceButton(t, group, size = 22) {
+    return div().id(`new-space-${group.key}`).size(size).flex_none().rounded(5).flex().items_center().justify_center()
+      .role("button").accessibility_label(`New space on ${group.label}`).tooltip(`New space on ${group.label}`)
+      .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: group.name ?? "" }); })
+      .child(glyph("space-plus", size > 22 ? 15 : 14));
   }
 
   // An unreachable host: nothing can be opened or started there, so it gets one dim line. A
@@ -660,7 +835,9 @@ export default class AgentSidebar extends View {
     const shownPanes = panes();
     const placed = new Set(shownPanes.filter(pane => pane.terminal).map(pane => pane.terminal));
     const built = build({ agents: agents(), terminals: terminals(), panes: shownPanes, spaces: spaces(), machines: hosts, focused: focused(), work: this.work, now });
-    const all = holdDone(dropLeaving(built, this.leaving, this.placed, placed, now), this.shown ?? new Map());
+    for (const address of this.parked) if (placed.has(address) || !built.some(row => row.address === address)) this.parked.delete(address);
+    const staying = new Set([...this.pending.map(move => move.address), ...this.parked]);
+    const all = holdDone(dropLeaving(built, this.leaving, this.placed, placed, now, staying), this.shown ?? new Map());
     this.placed = placed;
     this.notice(all, now);
     // Background work starts or ends when an agent's status changes: ask its machine again.
@@ -672,8 +849,10 @@ export default class AgentSidebar extends View {
     this.reported = reported;
     this.rows = all;
     const tally = counts(all);
-    this.bySpace = shared(GROUP_KEY) === "space";
-    const sections = groups(all, hosts, this.bySpace ? "space" : "status");
+    // Sessions move between spaces, so choosing where shows the spaces whatever the grouping.
+    if (this.moving && !this.moving.addresses.some(address => all.some(row => row.address === address))) this.moving = null;
+    this.bySpace = shared(GROUP_KEY) === "space" || Boolean(this.moving);
+    const sections = groups(all, hosts, this.bySpace ? "space" : "status", spaces());
     const compact = this.width < RAIL;
     this.expanded = shared(DENSITY_KEY) === "expanded";
     // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
@@ -696,6 +875,13 @@ export default class AgentSidebar extends View {
       this.visible.push(row);
       push(node, `row:${row.address}`, rowHeight);
     };
+    // While a space is being chosen: what is moving, and the way out.
+    if (this.moving && !compact) push(h_flex().id("moving").h(26).flex_none().mx(2).mb(2).px(8).gap(6).rounded(6).bg(t.raised).items_center().text_size(11)
+      .child(glyph("move", 12).text_color(t.accent))
+      .child(div().flex_1().min_w(0).truncate().child(`Move ${this.moving.title} to…`))
+      .child(div().id("moving-cancel").flex_none().px(5).h(18).rounded(4).flex().items_center().text_size(10.5).text_color(t.muted)
+        .role("button").accessibility_label("Cancel the move").cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Cancel · Esc")
+        .on_click((_e, cx) => { this.moving = null; cx.notify(); }).child("Cancel")), "moving", 28);
     if (this.single && compact) push(h_flex().h(30).flex_none().justify_center().items_center().child(this.newButton(t, local)));
     const firstAway = sections.findIndex(isAway);
     sections.forEach((group, i) => {
@@ -742,9 +928,10 @@ export default class AgentSidebar extends View {
       })
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
-          // Back to the current session.
+          // Out of a move; else back to the current session.
           this.selected = null;
-          this.open(this.visible.find(r => r.focused));
+          if (this.moving) this.moving = null;
+          else this.open(this.visible.find(r => r.focused));
         } else if (e.key === "enter") {
           const row = this.visible.find(r => r.address === this.selected);
           if (!row) return;
@@ -765,6 +952,7 @@ export default class AgentSidebar extends View {
           .child(div().font_semibold().text_size(14).child("Sessions"))
           .child(div().id("sessions-count").text_size(11.5).text_color(t.muted).child(String(tally.all)))
           .child(div().flex_1())
+          .when(this.single && this.bySpace, el => el.child(this.newSpaceButton(t, local, 26)))
           .when(this.single, el => el.child(this.newButton(t, local, 26)))
           .child(this.groupButton(t))
           .child(this.densityButton(t))
