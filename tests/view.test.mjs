@@ -1150,3 +1150,39 @@ test("dragging a session onto a space moves it; dragging a space onto another re
   assert.deepEqual(h.commands.at(-1), { name: "space.move", args: { id: "s2", index: 1 } });
   void press;
 });
+
+test("a working session says what it is doing, one that needs you what it wants; effort has its level's color", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "working", title: "Fix login", program: { name: "Claude", agent: true } },
+    { address: "t2", state: "live", status: "blocked", title: "Rotate keys", program: { name: "Claude", agent: true } },
+    { address: "t3", state: "live", status: "idle", title: "Write notes", program: { name: "Claude", agent: true } },
+  ];
+  h.state.panes = ["t1", "t2", "t3"].map((terminal, i) => ({ pane: `p${i}`, terminal, tab: "tb", cwd: "/Users/me/code/api", branch: "main" }));
+  const step = (tool, detail) => ({ tool, detail });
+  h.view.work = new Map([
+    ["t1", { ...reading("claude-opus-5-5", "xhigh"), context: 159200, activity: step("Bash", "Run the tests") }],
+    ["t2", { ...reading("claude-fable-5-2", "low"), activity: step("AskUserQuestion", "Which database?") }],
+    ["t3", { ...reading("claude-opus-5-5", "max"), context: 1240000, activity: step("Edit", "notes.md") }],
+  ]);
+  h.view.width = 400;
+  h.sharedState["agent-sidebar.density"] = "expanded";
+  let root = h.view.render();
+  assert.match(text(find(root, "agent-t1")), /Fix login Bash · Run the tests Opus 5\.5 · xhigh · 159k/);
+  assert.match(text(find(root, "agent-t2")), /Rotate keys Asks · Which database\? Fable 5\.2 · low/);
+  // Its turn over, what it last did is not what it does: the folder is back.
+  assert.match(text(find(root, "agent-t3")), /Write notes ~\/code\/api · main Opus 5\.5 · max · 1\.2M/);
+  assert.match(find(root, "agent-t1").props.tooltip, /\nBash · Run the tests\nOpus 5\.5 · xhigh effort · 159k context\n/);
+  assert.match(find(root, "agent-t1").props.tooltip, /\/Users\/me\/code\/api/); // the folder stays in the tooltip
+  // A permission it waits on reads as what it wants.
+  h.view.work.get("t2").activity = step("Bash", "Delete the build folder");
+  assert.match(text(find(h.view.render(), "agent-t2")), /Wants Bash · Delete the build folder/);
+  // Each level has its own color key, none of them a status color.
+  for (const id of ["effort-t1", "effort-t2", "effort-t3"]) assert.ok(find(root, id).props.text_color);
+  // Compact: after the title, where it fits.
+  h.sharedState["agent-sidebar.density"] = "compact";
+  assert.match(text(find(h.view.render(), "agent-t1")), /Fix login Opus · xhigh/);
+  h.view.width = 460;
+  assert.match(text(find(h.view.render(), "agent-t1")), /Fix login Bash · Run the tests Opus · xhigh/);
+});

@@ -31,7 +31,11 @@ const TURN_TAIL_BYTES = 1024 * 1024;
 //   G <session> * [<json>]            read in full: its last goal record, if any
 //   G <session> + <json>              the last goal record among bytes added since the last read
 //                                     (no Z line: too much to read in full this time)
-//   E <session> <model> <effort|->    the model and effort of its last turn, when one was read
+//   E <session> <model> <effort|-> <tokens|->   its last turn, when one was read: the model and
+//                                     effort it ran with and the context it was sent
+//   X <session> <text|->              the start of that turn's last tool call, if it made one
+//                                     (at most 480 bytes: its name, the first of its input and
+//                                     its description)
 //   T <session> <agent> <bytes>       a sub-agent transcript written in the last few minutes
 //   M <agent> <json>                  a new sub-agent's description (its .meta.json)
 //   A <agent> run|done                a changed sub-agent: still going, or handed back
@@ -62,16 +66,29 @@ function remember(  n, list, i, j, k, id) {
   }
 }
 function size_and_path() { size = $1 + 0; path = $0; sub(/^ *[0-9]+ /, "", path) }
-# "<model> <effort|->" from a finished assistant record of the session itself, else "". Only
-# the two values leave the machine, never the record.
-function turn(s,  m, e) {
+# "<model> <effort|-> <tokens|->" from a finished assistant record of the session itself, else
+# "": the model and effort it ran with, and how much context it was sent. The record itself
+# never leaves the machine.
+function count(s, key) { return match(s, "\\"" key "\\":[0-9]+") ? substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0 : 0 }
+# The start of that record: its last tool call (its name and the first of its input), or "-".
+function doing(s,  at, i) {
+  at = 0
+  while ((i = index(substr(s, at + 1), "\\"type\\":\\"tool_use\\"")) > 0) at += i
+  if (!at) return "-"
+  s = substr(s, at)
+  i = index(s, "\\"description\\":\\"")
+  return substr(s, 1, 300) (i > 300 ? " " substr(s, i, 180) : "")
+}
+function turn(s,  m, e, u) {
   if (substr(s, length(s)) != "}" || index(s, "\\"isSidechain\\":true")) return ""
   if (match(s, /"requestedModel":"[][A-Za-z0-9._:@-]+"/)) m = substr(s, RSTART + 18, RLENGTH - 19)
   else if (match(s, /"message":[{]"model":"[][A-Za-z0-9._:@-]+"/)) m = substr(s, RSTART + 20, RLENGTH - 21)
   else return ""
   e = "-"
   if (match(s, /"perTurnEffort":"[A-Za-z]+"/)) e = substr(s, RSTART + 17, RLENGTH - 18)
-  return m " " e
+  u = "-"
+  if (match(s, /"usage":[{]/)) { u = substr(s, RSTART, 400); u = count(u, "input_tokens") + count(u, "cache_creation_input_tokens") + count(u, "cache_read_input_tokens") }
+  return m " " e " " u
 }'
 # Before each file read from a byte offset: "==> <offset> <file> <==". Its first line is cut
 # short, unless the read starts at the beginning. One field a line: lines run to MBs.
@@ -167,8 +184,8 @@ EOF
   tail -c +"$from" "$path" 2>/dev/null
 done | awk -v mark="$mark" "$lib $skip"'
   index($0, mark) && substr($0, length($0)) == "}" { last[file] = $0 }
-  index($0, "\\"model\\":\\"") || index($0, "\\"requestedModel\\":\\"") { used = turn($0); if (used != "") ran[file] = used }
-  END { for (f in last) print "G " name(f) " + " last[f]; for (f in ran) print "E " name(f) " " ran[f] }'
+  index($0, "\\"model\\":\\"") || index($0, "\\"requestedModel\\":\\"") { used = turn($0); if (used != "") { ran[file] = used; act[file] = doing($0) } }
+  END { for (f in last) print "G " name(f) " + " last[f]; for (f in ran) { print "E " name(f) " " ran[f]; print "X " name(f) " " act[f] } }'
 IFS=$nl
 set -f
 [ -n "$full" ] && LC_ALL=C grep -F "$mark" $full /dev/null 2>/dev/null | awk "$lib"'
@@ -178,8 +195,8 @@ set -f
 [ -n "$full" ] && tail -c ${TURN_TAIL_BYTES} $full /dev/null 2>/dev/null | awk "$lib"'
   BEGIN { FS = "\\n" }
   /^==> .* <==$/ { file = substr($0, 5, length($0) - 8); next }
-  index($0, "\\"model\\":\\"") || index($0, "\\"requestedModel\\":\\"") { used = turn($0); if (used != "") ran[file] = used }
-  END { for (f in ran) print "E " name(f) " " ran[f] }'
+  index($0, "\\"model\\":\\"") || index($0, "\\"requestedModel\\":\\"") { used = turn($0); if (used != "") { ran[file] = used; act[file] = doing($0) } }
+  END { for (f in ran) { print "E " name(f) " " ran[f]; print "X " name(f) " " act[f] } }'
 # The sub-agents of busy sessions that wrote lately, and which of them changed.
 agents=
 [ "$subs" != "$nl" ] && agents=$(find $subs -name 'agent-*.jsonl' -mmin -${QUIET_MINUTES} -exec wc -c {} + 2>/dev/null | awk -v known="$known" "$lib"'
@@ -332,6 +349,7 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
   const starts = new Map();
   const metas = new Map();
   const turns = new Map();
+  const steps = new Map();
   for (const line of String(output ?? "").split("\n")) {
     let m;
     if ((m = /^P\s+(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/.exec(line))) {
@@ -346,8 +364,10 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
     } else if ((m = /^G (\S+) ([*+]) ?(.*)$/.exec(line))) {
       if (m[2] === "*") full.add(m[1]);
       if (m[3]) records.set(m[1], m[3]);
-    } else if ((m = /^E (\S+) ([\w.:@[\]-]{1,80}) (-|[A-Za-z]{1,16})$/.exec(line))) {
-      turns.set(m[1], { model: m[2], effort: m[3] === "-" ? null : m[3].toLowerCase() });
+    } else if ((m = /^E (\S+) ([\w.:@[\]-]{1,80}) (-|[A-Za-z]{1,16})(?: (-|\d{1,12}))?$/.exec(line))) {
+      turns.set(m[1], { model: m[2], effort: m[3] === "-" ? null : m[3].toLowerCase(), context: m[4] && m[4] !== "-" ? Number(m[4]) : null });
+    } else if ((m = /^X (\S+) (.*)$/.exec(line))) {
+      steps.set(m[1], activityOf(m[2]));
     } else if ((m = /^T (\S+) (\S+) (\d+)$/.exec(line))) {
       if (!listed.has(m[1])) listed.set(m[1], new Map());
       listed.get(m[1]).set(m[2], Number(m[3]));
@@ -374,9 +394,11 @@ export function parseProbe(output, at = Date.now(), read = new Map()) {
     }
     goals.set(id, goal);
     // Only a turn that was read says which model ran it: until the next one, the last stands.
-    const { model = null, effort = null } = turns.get(id) ?? read.get(id) ?? {};
-    if (model) models.set(id, { model, effort });
-    next.set(id, { bytes, goal, folder: folders.get(id) ?? null, model, effort });
+    const { model = null, effort = null, context = null } = turns.get(id) ?? read.get(id) ?? {};
+    // What that turn was doing comes with it, and stands with it.
+    const activity = turns.has(id) ? steps.get(id) ?? null : read.get(id)?.activity ?? null;
+    if (model) models.set(id, { model, effort, context, activity });
+    next.set(id, { bytes, goal, folder: folders.get(id) ?? null, model, effort, context, activity });
   }
   const subagents = new Map();
   for (const [session, list] of listed) {
@@ -404,6 +426,26 @@ export function probeArgs(targets, read = new Map()) {
     ...[...read].filter(([id, seen]) => ID.test(id) && Number.isSafeInteger(seen.bytes))
       .map(([id, seen]) => `${id}=${seen.bytes}${FOLDER.test(seen.folder ?? "") ? `@${seen.folder}` : ""}`),
   ];
+}
+
+// What a tool call is about, from the start of it: { tool, detail }, or null. The text is cut
+// by bytes, so it may end inside a string, an escape or a character: whatever can't be read
+// is dropped.
+const ABOUT = ["description", "question", "command", "file_path", "pattern", "query", "url", "prompt", "skill", "subject"];
+export function activityOf(slice) {
+  const name = /"name":"([\w.:-]{1,100})"/.exec(slice ?? "")?.[1];
+  if (!name) return null;
+  let detail = "";
+  for (const key of ABOUT) {
+    const found = new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)`).exec(slice)?.[1];
+    if (!found) continue;
+    try { detail = JSON.parse(`"${found.replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, "")}"`); } catch { detail = ""; }
+    detail = detail.replace(/�+$/, "");
+    if (key === "file_path") detail = detail.split(/[\\/]/).pop();
+    if (detail) break;
+  }
+  // "mcp__github__create_issue" → "create_issue".
+  return { tool: name.split("__").pop(), detail: text(detail, 140) };
 }
 
 // What a claude command line says it runs with ("claude --model claude-opus-5-5"), or null.
@@ -445,12 +487,18 @@ export function workOf(targets, probe) {
     const id = probe.logs.get(entry.pid);
     // The last turn's, when its transcript was read; else what the command line asked for.
     const ran = (id && probe.models?.get(id)) || entry.flags;
+    const read = (id && probe.models?.get(id)) || null;
     out.set(roots.get(root), {
       at: probe.at,
       session: session ? { status: typeof session.status === "string" ? session.status : null } : null,
       goal: (id && probe.goals.get(id)) ?? null,
       model: ran?.model ?? null,
       effort: ran?.effort ?? null,
+      // Tokens of context its last turn was sent, and what that turn was doing, if it was read.
+      context: read?.context ?? null,
+      activity: read?.activity ?? null,
+      // Claude Code's id for the session, to resume it by.
+      id: id ?? null,
       shells: entry.shells.sort((a, b) => a.started - b.started),
       subagents: (id && probe.subagents.get(id)) ?? [],
     });
@@ -473,6 +521,6 @@ export function probeTargets(rows) {
 // What a reading says, without times: redraw only when this changes.
 export function signature(work) {
   return JSON.stringify([...work].sort(([a], [b]) => a.localeCompare(b)).map(([address, info]) =>
-    [address, info.session?.status ?? null, info.goal?.condition ?? null, info.goal?.check ?? null, info.model ?? null, info.effort ?? null,
+    [address, info.session?.status ?? null, info.goal?.condition ?? null, info.goal?.check ?? null, info.model ?? null, info.effort ?? null, info.context ?? null, info.activity?.tool ?? null, info.activity?.detail ?? null,
       info.shells.map(shell => shell.text), info.subagents.map(sub => [sub.id, sub.description])]));
 }

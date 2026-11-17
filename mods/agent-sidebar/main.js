@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, canMove, moveArgs, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
 import { PROBE, PROBE_MS, KIND, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
@@ -37,6 +37,8 @@ const KIND_RETRY_MS = 60000;
 const SPACE_COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 // A session being moved has this long to lose its pane before the move is given up.
 const MOVE_MS = 8000;
+// The effort a session runs with, from cool to warm. Not the status colors' yellow.
+const EFFORT_COLOR = { low: "ansi2", medium: "ansi6", high: "ansi4", xhigh: "ansi5", max: "ansi1" };
 const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
 // Sessions under a folder heading sit this much further in.
 const GROUPED_INDENT = 10;
@@ -496,24 +498,27 @@ export default class AgentSidebar extends View {
       : row.background.some(reason => reason !== "goal") ? "Working in the background" : "Goal active";
     const state = !row.available ? "Unavailable" : row.kind === "agent" && row.since ? `${word} · ${duration(now - row.since)}` : word;
     const from = !row.parent ? "" : row.inner ? `Inside ${row.parent}` : `Started from ${row.parent}`;
-    return [row.title, context, host, state, this.usesText(row), ...backgroundLines(row, now), row.inner ? "" : row.address, row.cwd, from].filter(Boolean).join("\n");
+    return [row.title, context, host, state, activityText(row), this.usesText(row), ...backgroundLines(row, now), row.inner ? "" : row.address, row.cwd, from].filter(Boolean).join("\n");
   }
 
-  // "Opus 5.5 · xhigh effort": what the session's last turn ran with, when its machine said.
+  // "Opus 5.5 · xhigh effort · 159k context": what the session's last turn ran with, and how
+  // much context it was sent, when its machine said.
   usesText(row) {
     const name = modelName(row.model);
-    return name ? [name.label, row.effort ? `${row.effort} effort` : ""].filter(Boolean).join(" · ") : "";
+    const used = tokens(row.context);
+    return name ? [name.label, row.effort ? `${row.effort} effort` : "", used ? `${used} context` : ""].filter(Boolean).join(" · ") : "";
   }
 
-  // The same, at a glance, in words: `label` is the model's name, or none where there is no
-  // room for it. The effort is the brighter of the two: it is what differs between sessions.
-  uses(t, row, label) {
+  // The same, at a glance, in words: `label` is the model's name and `context` its tokens, or
+  // none where there is no room. The effort has its level's color: it is what differs most.
+  uses(t, row, label, context = "") {
     const effort = row.effort ?? "";
     if (!label && !effort) return null;
     return h_flex().id(`uses-${row.address}`).flex_none().gap(3).items_center().text_size(10.5).text_color(t.dim).tooltip(this.usesText(row))
       .when(Boolean(label), el => el.child(div().child(label)))
       .when(Boolean(label && effort), el => el.child(div().child("·")))
-      .when(Boolean(effort), el => el.child(div().text_color(t.muted).child(effort)));
+      .when(Boolean(effort), el => el.child(div().id(`effort-${row.address}`).text_color(t[EFFORT_COLOR[effort]] ?? t.muted).child(effort)))
+      .when(Boolean(context), el => el.child(div().child("·")).child(div().child(context)));
   }
 
   // `grouped`: under a folder heading, which already says where it works.
@@ -540,23 +545,32 @@ export default class AgentSidebar extends View {
     const effort = name && row.effort ? row.effort : "";
     const px = (Number.isFinite(this.width) ? this.width : WIDE) - 104 - indent;
     const said = label => [label, effort].filter(Boolean).join(" · ");
+    // What it is doing or asking, while it works or needs you: in place of the folder, which
+    // stays in the tooltip.
+    const doing = activityText(row);
+    const used = tokens(row.context);
+    let context = "";
     let model = "";
     let shown = Boolean(name);
     let where = row.inner ? row.space : [shortPath(row.cwd), row.branch].filter(Boolean).join(" · ");
     let room = Math.floor(px / 6.5);
     if (expanded && name) {
       const line = Math.floor(px / 5.6);
-      model = where.length + said(name.label).length + 2 <= line ? name.label : name.family;
-      if (!row.inner) where = fitWhere(shortPath(row.cwd), row.branch, line - said(model).length - 2);
+      const first = doing || where;
+      model = first.length + said(name.label).length + 2 <= line ? name.label : name.family;
+      context = used && first.length + said(model).length + used.length + 5 <= line ? used : "";
+      if (!row.inner && !doing) where = fitWhere(shortPath(row.cwd), row.branch, line - said(model).length - 2);
     } else if (name) {
       const fits = [said(name.family), effort].filter(Boolean).find(text => row.title.length + text.length + 2 <= room);
       shown = Boolean(fits);
       model = fits === effort ? "" : name.family;
       if (fits) room -= fits.length + 2;
     }
-    const detail = !expanded && !(grouped && !row.inner) && folder && !row.title.toLowerCase().includes(folder.toLowerCase())
-      && row.title.length + folder.length + 2 <= room ? folder : "";
-    const uses = shown ? this.uses(t, row, model) : null;
+    if (expanded && doing) where = doing;
+    const detail = expanded ? "" : doing ? (row.title.length + doing.length + 2 <= room ? doing : "")
+      : !(grouped && !row.inner) && folder && !row.title.toLowerCase().includes(folder.toLowerCase())
+        && row.title.length + folder.length + 2 <= room ? folder : "";
+    const uses = shown ? this.uses(t, row, model, context) : null;
     const tip = this.tip(row, now);
     const pin = div().id(`pin-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
       .role("button").accessibility_label(row.pinned ? `Unpin ${row.title}` : `Pin ${row.title}`)
@@ -629,7 +643,7 @@ export default class AgentSidebar extends View {
       ? v_flex().flex_1().min_w(0).gap(1)
         .child(title)
         .child(h_flex().min_w(0).gap(6).items_center()
-          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(where || " "))
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(doing ? t.muted : t.dim).child(where || " "))
           .when(Boolean(uses), el => el.child(uses)))
       : h_flex().flex_1().min_w(0).gap(5).items_center()
         .child(title)

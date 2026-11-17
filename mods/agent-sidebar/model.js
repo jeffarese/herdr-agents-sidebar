@@ -80,7 +80,7 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
       reported: status,
       background: [], goal: null, shells: [], helpers: [],
       // What its last turn ran with, when its machine could say (background.js).
-      model: null, effort: null,
+      model: null, effort: null, context: null, activity: null, session: null,
     });
   }
   const fresh = address => {
@@ -108,7 +108,7 @@ function addSubagents(rows, fresh) {
         program: null, space: sub.type, spaceId: row.spaceId, spaceOrder: row.spaceOrder, pane: row.pane, terminal: row.address, parent: row.address,
         cwd: row.cwd, branch: row.branch, pinned: false, focused: false, changed: sub.started, since: sub.started, seq: 0,
         available: row.available, pid: null, inBackground: sub.background,
-        background: [], goal: null, shells: [], helpers: [], model: null, effort: null,
+        background: [], goal: null, shells: [], helpers: [], model: null, effort: null, context: null, activity: null, session: null,
       });
     }
   }
@@ -125,6 +125,10 @@ function holdBackground(rows, fresh) {
     row.goal = info?.goal ?? null;
     row.model = info?.model ?? null;
     row.effort = info?.effort ?? null;
+    row.context = info?.context ?? null;
+    row.session = info?.id ?? null;
+    // What its last turn was doing says what it does now only while that turn goes on.
+    row.activity = row.reported === "working" || row.reported === "blocked" ? info?.activity ?? null : null;
     if (!RESTING.has(row.reported)) continue;
     row.shells = info?.shells ?? [];
     const session = info?.session?.status;
@@ -338,6 +342,19 @@ export function modelName(id) {
   const version = words.filter(word => /^\d{1,2}$/.test(word)).join(".");
   return { family, label: version ? `${family} ${version}` : family };
 }
+
+// What a session is doing ("Bash · Run the tests") or, when it needs you, what it wants
+// ("Asks · Which database?", "Wants Bash · rm -rf build"). "" when its machine didn't say.
+const ASKS = new Set(["AskUserQuestion", "ExitPlanMode"]);
+export function activityText(row) {
+  const a = row.activity;
+  if (!a?.tool) return "";
+  const what = ASKS.has(a.tool) ? (a.tool === "ExitPlanMode" ? "Plan ready" : "Asks") : row.status === "blocked" ? `Wants ${a.tool}` : a.tool;
+  return [what, a.detail].filter(Boolean).join(" · ");
+}
+
+// "159k", "1.2M": tokens of context, as people say them.
+export const tokens = n => !Number.isFinite(n) || n <= 0 ? "" : n >= 999500 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 
 // Compact age, as Herdr's Agents panel shows it: <1m, 4m, 2h, 3d.
 export function duration(ms) {

@@ -4,13 +4,13 @@ import { spawn, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROBE, KIND, machineKind, flagsOf, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
+import { PROBE, KIND, machineKind, flagsOf, activityOf, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
 
 // As ps prints a background command Claude Code started (captured from Claude Code 2.1.323).
 const snapshot = command => `/bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1794566139050-qx5w1i.sh 2>/dev/null || true && \\builtin setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval '${command.replaceAll("'", `'"'"'`)}' < /dev/null && pwd -P >| /tmp/claude-151a-cwd`;
 // An assistant record of the session itself, as Claude Code 2.1.326 writes it: the model and
 // effort follow the message. A tool call's own input may hold the same keys.
-const turn = (model, effort, input = {}) => JSON.stringify({ parentUuid: "a", isSidechain: false, message: { model, role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Agent", input }] }, requestedModel: model, type: "assistant", ...(effort ? { effort, perTurnEffort: effort } : {}) });
+const turn = (model, effort, input = {}) => JSON.stringify({ parentUuid: "a", isSidechain: false, message: { model, role: "assistant", content: [{ type: "text", text: "On it." }, { type: "tool_use", id: "toolu_1", name: "Agent", input }], usage: { input_tokens: 10, cache_creation_input_tokens: 200, cache_read_input_tokens: 3000, output_tokens: 5 } }, requestedModel: model, type: "assistant", ...(effort ? { effort, perTurnEffort: effort } : {}) });
 const goal = fields => JSON.stringify({ parentUuid: "a", isSidechain: false, type: "attachment", attachment: { type: "goal_status", ...fields } });
 // Records of a sub-agent's transcript, as Claude Code 2.1.323 writes them.
 const prompt = (text, timestamp) => JSON.stringify({ parentUuid: null, isSidechain: true, agentId: "x", type: "user", message: { role: "user", content: text }, timestamp });
@@ -108,7 +108,7 @@ test("a wrapper's Claude Code session is found, and only its background shells c
   assert.deepEqual(work.get("t1").session, { status: "busy" });
   assert.deepEqual(work.get("t1").shells, [{ text: "npm test", started: now - 240000 }, { text: "sleep 300", started: now - 30000 }]);
   assert.deepEqual(work.get("t1").subagents.map(sub => sub.id), ["a1"]);
-  assert.deepEqual(work.get("t2"), { at: now, session: null, goal: null, model: null, effort: null, shells: [], subagents: [] });
+  assert.deepEqual(work.get("t2"), { at: now, session: null, goal: null, model: null, effort: null, context: null, activity: null, id: null, shells: [], subagents: [] });
   assert.equal(work.has("t3"), false); // its process is gone
   // A reading's signature ignores times.
   assert.equal(signature(work), signature(workOf([{ address: "t1", pid: 900 }, { address: "t2", pid: 950 }], parseProbe("P 900 1 00:01 agp\nP 950 1 00:01 claude\nP 901 900 00:01 claude\n" +
@@ -146,7 +146,8 @@ for (const [shell, ...flags] of shells) {
     const log = join(project, "abc-123.jsonl");
     const record = goal({ met: false, sentinel: true, condition: "Ship it" });
     const pad = n => `${JSON.stringify({ type: "user", text: "x".repeat(n - 25) })}\n`; // n + 1 bytes
-    writeFileSync(log, `${turn("claude-opus-5-5", "xhigh", { model: "haiku", effort: "low" })}\n${pad(9000 - 400)}${pad(399 - turn("claude-opus-5-5", "xhigh", { model: "haiku", effort: "low" }).length - 1)}${record}\n${pad(4096 + 20 - record.length - 2)}`);
+    const first = turn("claude-opus-5-5", "xhigh", { model: "haiku", effort: "low", prompt: `${"long ".repeat(80)}prompt`, description: "Review the \"auth\" módule" });
+    writeFileSync(log, `${first}\n${pad(9000 - first.length - 1)}${record}\n${pad(4096 + 20 - record.length - 2)}`);
     // One sub-agent still working, one that handed its report back.
     writeFileSync(join(subagents, "agent-a1.jsonl"), [prompt("Review the repo", "2026-11-13T11:14:14.969Z"), call("Read"), result("ok"), ""].join("\n"));
     writeFileSync(join(subagents, "agent-a1.meta.json"), JSON.stringify({ agentType: "general-high", description: "Review the repo", requestShape: "background" }));
@@ -171,6 +172,9 @@ for (const [shell, ...flags] of shells) {
     assert.deepEqual(work.goal, { condition: "Ship it", check: "" });
     // The session's own model and effort, not the ones a tool call asked for.
     assert.deepEqual([work.model, work.effort], ["claude-opus-5-5", "xhigh"]);
+    // The context that turn was sent, what it was doing (its description, though it comes after
+    // a long input), and the session's id.
+    assert.deepEqual([work.context, work.activity, work.id], [3210, { tool: "Agent", detail: "Review the \"auth\" módule" }, "abc-123"]);
     assert.deepEqual(work.subagents, [{ id: "a1", type: "general-high", description: "Review the repo", background: true, started: Date.parse("2026-11-13T11:14:14.969Z") }]);
     // The same session open in a second process (resumed twice): read once, listed once.
     const child = [...probe.procs.values()].find(proc => proc.parent === String(agent.pid));
@@ -186,9 +190,10 @@ for (const [shell, ...flags] of shells) {
     const grown = run(probe.read);
     assert.deepEqual(grown.goals.get("abc-123"), { condition: "Ship it", check: "" });
     // No new turn: the model stands. A turn after "/model" replaces it; one cut short doesn't.
-    assert.deepEqual(grown.models.get("abc-123"), { model: "claude-opus-5-5", effort: "xhigh" });
+    assert.deepEqual([grown.models.get("abc-123").model, grown.models.get("abc-123").effort, grown.models.get("abc-123").activity.tool], ["claude-opus-5-5", "xhigh", "Agent"]);
     appendFileSync(log, `${turn("claude-fable-5-2", "high")}\n${turn("claude-haiku-5-5", "low").slice(0, -30)}`);
-    assert.deepEqual(run(grown.read).models.get("abc-123"), { model: "claude-fable-5-2", effort: "high" });
+    const switched = run(grown.read).models.get("abc-123");
+    assert.deepEqual([switched.model, switched.effort, switched.context, switched.activity], ["claude-fable-5-2", "high", 3210, { tool: "Agent", detail: "" }]);
     appendFileSync(log, "\n");
     // "/goal clear" appends a met sentinel, found in the new bytes. The sub-agent finishes.
     appendFileSync(log, `${goal({ met: true, sentinel: true, condition: "Ship it" })}\n`);
@@ -237,12 +242,16 @@ test("a transcript that grows while it is read loses no goal record", { skip: !e
 
 test("what the probe read of a session's last turn is kept until a newer turn is read", () => {
   const first = parseProbe("Z s1 500\nZ s2 900\nE s1 claude-opus-5-5 xhigh\nE s2 claude-sonnet-4-5[1m] -\nE s3 rm$(x) high\n");
-  assert.deepEqual(first.models.get("s1"), { model: "claude-opus-5-5", effort: "xhigh" });
-  assert.deepEqual(first.models.get("s2"), { model: "claude-sonnet-4-5[1m]", effort: null });
+  const said = (probe, id) => { const m = probe.models.get(id); return [m.model, m.effort, m.context, m.activity]; };
+  assert.deepEqual(said(first, "s1"), ["claude-opus-5-5", "xhigh", null, null]);
+  assert.deepEqual(said(first, "s2"), ["claude-sonnet-4-5[1m]", null, null, null]);
   assert.equal(first.models.has("s3"), false);
-  const second = parseProbe("Z s1 500\nZ s2 950\nE s2 claude-fable-5-2 high\n", Date.now(), first.read);
-  assert.deepEqual(second.models.get("s1"), { model: "claude-opus-5-5", effort: "xhigh" });
-  assert.deepEqual(second.models.get("s2"), { model: "claude-fable-5-2", effort: "high" });
+  const second = parseProbe(`Z s1 500\nZ s2 950\nE s2 claude-fable-5-2 high 159000\nX s2 "type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"npm test","description":"Run the tests"}\n`, Date.now(), first.read);
+  assert.deepEqual(said(second, "s1"), ["claude-opus-5-5", "xhigh", null, null]);
+  assert.deepEqual(said(second, "s2"), ["claude-fable-5-2", "high", 159000, { tool: "Bash", detail: "Run the tests" }]);
+  // Unchanged, all of it stands; a later turn with no tool call is doing nothing we can name.
+  assert.deepEqual(said(parseProbe("Z s1 500\nZ s2 950\n", Date.now(), second.read), "s2"), said(second, "s2"));
+  assert.equal(parseProbe("Z s2 990\nE s2 claude-fable-5-2 high 160000\nX s2 -\n", Date.now(), second.read).models.get("s2").activity, null);
   // A change of model or effort is news: the sidebar redraws.
   const work = probe => new Map([["t1", { at: 1, session: null, goal: null, shells: [], subagents: [], ...probe.models.get("s2") }]]);
   assert.notEqual(signature(work(first)), signature(work(second)));
@@ -264,4 +273,18 @@ test("a session with no transcript to read takes its model from its command line
   // A transcript that was read wins: "/model" changes it, not the command line.
   const read = parseProbe("P 10 1 05:00 claude --model claude-opus-5-5\nL 10 s1\nZ s1 500\nE s1 claude-fable-5-2 high\n", 1000000);
   assert.deepEqual([workOf([{ address: "t1", pid: 10 }], read).get("t1").model, workOf([{ address: "t1", pid: 10 }], read).get("t1").effort], ["claude-fable-5-2", "high"]);
+});
+
+test("what a tool call is about is read from its start, however it was cut", () => {
+  const call = (name, input) => `"type":"tool_use","id":"toolu_1","name":"${name}","input":${JSON.stringify(input)}`;
+  assert.deepEqual(activityOf(call("Bash", { command: "npm test", description: "Run the tests" })), { tool: "Bash", detail: "Run the tests" });
+  assert.deepEqual(activityOf(call("Edit", { file_path: "/Users/me/app/src/main.js", old_string: "a" })), { tool: "Edit", detail: "main.js" });
+  assert.deepEqual(activityOf(call("AskUserQuestion", { questions: [{ question: "Which \"database\"?", header: "DB" }] })), { tool: "AskUserQuestion", detail: "Which \"database\"?" });
+  assert.deepEqual(activityOf(call("mcp__github__create_issue", { title: "x" })), { tool: "create_issue", detail: "" });
+  // Cut inside a string, an escape or a character: what is whole is kept.
+  assert.deepEqual(activityOf(call("Bash", { command: "echo one two three" }).slice(0, -12)), { tool: "Bash", detail: "echo one" });
+  assert.deepEqual(activityOf(`"type":"tool_use","name":"Bash","input":{"command":"say \\u00`), { tool: "Bash", detail: "say" });
+  assert.deepEqual(activityOf(`"type":"tool_use","name":"Bash","input":{"command":"caf\uFFFD`), { tool: "Bash", detail: "caf" });
+  assert.equal(activityOf("-"), null);
+  assert.equal(activityOf(`"type":"tool_use","id":"toolu_1","na`), null);
 });
