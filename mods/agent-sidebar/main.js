@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
-import { h_flex, v_flex, ScrollHandle } from "gpui-base";
+import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, moveArgs, canReply, stale, ended, remember, resumeAction, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
 import { PROBE, PROBE_MS, KIND, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 
@@ -37,6 +37,8 @@ const KIND_RETRY_MS = 60000;
 const SPACE_COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 // A session being moved has this long to lose its pane before the move is given up.
 const MOVE_MS = 8000;
+// Claude Code sessions that ended, newest first, to reopen: { title, cwd, machine, session, at }.
+const CLOSED_KEY = "agent-sidebar.closed";
 // The effort a session runs with, from cool to warm. Not the status colors' yellow.
 const EFFORT_COLOR = { low: "ansi2", medium: "ansi6", high: "ansi4", xhigh: "ansi5", max: "ansi1" };
 const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
@@ -85,6 +87,13 @@ export default class AgentSidebar extends View {
     this.parked = new Set();
     this.drag = null;
     this.hoveredSection = null;
+    // The session a message is being written to, in the field under its row.
+    this.replying = null;
+    this.reply = InputState.new({ placeholder: "Message, then Enter" });
+    this.reply.on("submit", (_e, cx) => { this.send(); cx?.notify?.(); });
+    // address → what was last seen of each Claude Code session, to tell when one ended.
+    this.known = new Map();
+    this.closedOpen = Boolean(store.get("closedOpen", false));
     // address → the status each row was shown with, and the changes still animating.
     this.shown = null;
     this.fresh = new Map();
@@ -255,7 +264,7 @@ export default class AgentSidebar extends View {
       if (key) ys.set(key, y);
       y += heights[i];
     });
-    const view = [this.expanded, this.bySpace, Boolean(this.moving), this.width, this.single, compact].join("|");
+    const view = [this.expanded, this.bySpace, Boolean(this.moving), this.replying, this.width, this.single, compact].join("|");
     if (this.ys && this.view === view && !compact) {
       for (const [key, now_] of ys) {
         const was = this.ys.get(key);
@@ -333,6 +342,80 @@ export default class AgentSidebar extends View {
         else notify({ title: `Moved ${move.row.title} to ${name}`, level: "success", timeout: 2500 });
       }).catch(() => failed("It is still running, without a pane: find it under No space."));
     }
+  }
+
+  // Sends what was typed to the session, as `hc send` does: pasted, then Enter.
+  send() {
+    const address = this.replying;
+    const text = this.reply.value().trim();
+    this.replying = null;
+    this.reply.set_value("");
+    const row = (this.rows ?? []).find(row => row.address === address);
+    if (!text || !canReply(row)) return;
+    const failed = why => notify({ title: `Could not send to ${row.title}`, body: String(why ?? "").trim().slice(0, 160), level: "warning" });
+    hc(["send", address, text]).then(result => { if (result.code !== 0) failed(result.stderr || result.stdout); }).catch(failed);
+  }
+
+  replyField(t, row, indent) {
+    return h_flex().id(`reply-${row.address}`).h(28).flex_none().ml(indent).mr(4).mb(2).pl(8).pr(6).gap(6).rounded(6)
+      .bg(t.background).border(1).border_color(t.border).items_center()
+      .child(glyph("reply", 12).text_color(t.muted))
+      .child(Input.new(this.reply).accessibility_label(`Message to ${row.title}`).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground))
+      .child(div().flex_none().text_size(10).text_color(t.dim).child("Esc cancels"));
+  }
+
+  // Closes every session idle for over a day, on a second click.
+  cleanUp(t, list) {
+    const armed = Date.now() - (this.armedClean ?? 0) < ARMED_MS;
+    const n = `${list.length} ${list.length === 1 ? "session" : "sessions"}`;
+    return h_flex().id("clean-up").h(26).flex_none().rounded(6).px(8).gap(8).items_center()
+      .role("button").accessibility_label(armed ? `Click again to close ${n}` : `Close ${n} idle for over a day`)
+      .tooltip(list.slice(0, 8).map(row => row.title).join("\n") + (list.length > 8 ? `\n+${list.length - 8} more` : ""))
+      .cursor_pointer().text_size(11.5).text_color(armed ? t.blocked : t.dim).when(armed, el => el.bg(t.blocked + "26"))
+      .hover(s => s.bg(armed ? t.blocked + "33" : t.hover).text_color(armed ? t.blocked : t.foreground))
+      .on_hover((inside, cx) => { if (!inside && this.armedClean) { this.armedClean = 0; cx.notify(); } })
+      .on_click((_e, cx) => {
+        if (!armed) this.armedClean = Date.now();
+        else if (Date.now() - this.armedClean > DOUBLE_CLICK_MS) {
+          this.armedClean = 0;
+          for (const row of list) this.close(row);
+        }
+        cx.notify();
+      })
+      .child(glyph("x", 13))
+      .child(armed ? `Click again to close ${n}` : `Close ${n} idle for over a day`);
+  }
+
+  // Claude Code sessions that ended: a click starts one again where it left off.
+  closedList(t, closed, now) {
+    const open = this.closedOpen;
+    const heading = h_flex().id("closed").h(HEIGHT.section).flex_none().mt(6).pl(10).pr(8).gap(6).items_center()
+      .role("button").accessibility_label(`Recently closed, ${closed.length}, ${open ? "expanded" : "collapsed"}`)
+      .cursor_pointer().rounded(5).text_size(10.5).font_medium().hover(s => s.bg(t.hover))
+      .on_click((_e, cx) => { this.closedOpen = !open; store.set("closedOpen", this.closedOpen); cx.notify(); })
+      .child(div().text_color(t.muted).child("Recently closed"))
+      .child(div().text_color(t.dim).child(String(closed.length)))
+      .child(div().flex_1())
+      .child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim));
+    if (!open) return [heading];
+    const forget = entry => setShared(CLOSED_KEY, (shared(CLOSED_KEY) ?? []).filter(other => other.session !== entry.session));
+    return [heading, ...closed.map(entry => h_flex().id(`closed-${entry.session}`).h(26).flex_none().rounded(6).pl(8).pr(6).gap(8).items_center()
+      .role("button").accessibility_label(`Reopen ${entry.title}`).cursor_pointer().hover(s => s.bg(t.hover))
+      .tooltip([`Reopen ${entry.title}`, this.single ? "" : entry.machine ?? "This computer", entry.cwd, `claude --resume ${entry.session}`].filter(Boolean).join("\n"))
+      .on_click((_e, cx) => {
+        const action = resumeAction(entry, machines(), spaces(), focused());
+        if (!action) return;
+        run(action.name, action.args);
+        forget(entry);
+        cx.notify();
+      })
+      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(entry.title))
+      .when(!this.single && entry.machine != null, el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(entry.machine)))
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(duration(now - entry.at)))
+      .child(div().id(`forget-${entry.session}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
+        .role("button").accessibility_label(`Forget ${entry.title}`).tooltip("Forget")
+        .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); forget(entry); cx.notify(); }).child(glyph("x", 11))))];
   }
 
   recolor(space) {
@@ -596,6 +679,20 @@ export default class AgentSidebar extends View {
         cx.notify();
       })
       .child(glyph("plus", 13));
+    // A message to it, typed in a field that opens under the row.
+    const reply = div().id(`reply-to-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
+      .role("button").accessibility_label(`Send a message to ${row.title}`)
+      .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Send it a message")
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.replying = row.address;
+        this.reply.set_value("");
+        this.reply.focus();
+        this.hovered = null;
+        cx.notify();
+      })
+      .child(glyph("reply", 12));
     // To another space: every space it can go to then takes the click.
     const others = !row.inner && spaces().filter(space => (space.machine ?? null) === row.machine && space.id !== row.spaceId).length > 0;
     const move = div().id(`move-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
@@ -673,10 +770,12 @@ export default class AgentSidebar extends View {
       .when(row.pinned && section !== "pinned" && !pinning, el => el.child(glyph("pin", 11).text_color(t.dim)))
       .when(goal, el => el.child(div().id(`goal-${row.address}`).flex_none().tooltip(`Goal: ${row.goal.condition}`)
         .child(glyph("goal", 11).text_color(t.dim))))
-      .when(pinning && !armed && others, el => el.child(move))
-      .when(pinning && !armed && Boolean(row.cwd), el => el.child(here))
-      .when(pinning && !armed, el => el.child(pin))
-      .when(pinning, el => el.child(close))
+      .when(pinning, el => el.child(h_flex().flex_none().gap(2).items_center()
+        .when(!armed && canReply(row), el => el.child(reply))
+        .when(!armed && others, el => el.child(move))
+        .when(!armed && Boolean(row.cwd), el => el.child(here))
+        .when(!armed, el => el.child(pin))
+        .child(close)))
       .when(!expanded && !pinning && Boolean(uses), el => el.child(uses))
       .when(!pinning && Boolean(age), el => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(age)))
       .child(this.mark(t, row, section));
@@ -862,6 +961,12 @@ export default class AgentSidebar extends View {
     for (const [machine, key] of reported) if (this.reported?.get(machine) !== key) this.stale.add(machine);
     this.reported = reported;
     this.rows = all;
+    // Sessions whose terminal is gone from a machine that answers have ended: kept to reopen.
+    const gone = ended(this.known, new Set(terminals().filter(terminal => terminal.state === "live").map(terminal => terminal.address)),
+      new Set(hosts.filter(host => host.layout === "ready").map(host => host.name ?? null)));
+    if (gone.length) setShared(CLOSED_KEY, gone.reduce((list, seen) => remember(list, seen, now), shared(CLOSED_KEY) ?? []));
+    for (const row of all) if (row.kind === "agent" && !row.inner && row.available && row.session) this.known.set(row.address, { title: row.title, cwd: row.cwd, machine: row.machine, session: row.session });
+    if (this.replying && !canReply(all.find(row => row.address === this.replying))) this.replying = null;
     const tally = counts(all);
     // Sessions move between spaces, so choosing where shows the spaces whatever the grouping.
     if (this.moving && !this.moving.addresses.some(address => all.some(row => row.address === address))) this.moving = null;
@@ -888,6 +993,7 @@ export default class AgentSidebar extends View {
       this.positions.set(row.address, children.length);
       this.visible.push(row);
       push(node, `row:${row.address}`, rowHeight);
+      if (this.replying === row.address && !compact) push(this.replyField(t, row, 30), `reply:${row.address}`, 30);
     };
     // While a space is being chosen: what is moving, and the way out.
     if (this.moving && !compact) push(h_flex().id("moving").h(26).flex_none().mx(2).mb(2).px(8).gap(6).rounded(6).bg(t.raised).items_center().text_size(11)
@@ -925,6 +1031,14 @@ export default class AgentSidebar extends View {
         .child(group.layout === "ready" ? "No sessions yet · use + to start one" : group.layout === "loading" ? "Loading sessions…" : "Sessions appear when this host reconnects"), `empty:${group.key}`, HEIGHT.empty);
     });
     this.slide(t, children, keys, heights, compact, now);
+    if (!compact) {
+      // Only when there is something to close, or to reopen.
+      const old = stale(all, now);
+      if (old.length) children.push(this.cleanUp(t, old).mt(6));
+      const closed = (shared(CLOSED_KEY) ?? []).filter(entry => !all.some(row => row.session === entry.session)
+        && hosts.some(host => (host.name ?? null) === (entry.machine ?? null)));
+      if (closed.length) children.push(...this.closedList(t, closed, now));
+    }
     children.push(...this.extras(t, compact));
     setAgentOrder(this.visible.filter(r => r.kind === "agent" && !r.inner).map(r => r.address));
     // Drawn at their start: the next frame draws them at their end.
@@ -944,7 +1058,8 @@ export default class AgentSidebar extends View {
         if (e.key === "escape") {
           // Out of a move; else back to the current session.
           this.selected = null;
-          if (this.moving) this.moving = null;
+          if (this.replying) { this.replying = null; this.reply.set_value(""); }
+          else if (this.moving) this.moving = null;
           else this.open(this.visible.find(r => r.focused));
         } else if (e.key === "enter") {
           const row = this.visible.find(r => r.address === this.selected);

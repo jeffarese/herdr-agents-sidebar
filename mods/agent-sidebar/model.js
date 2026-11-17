@@ -400,6 +400,42 @@ export function moveArgs(row, space, tab) {
   return ["label", row.address, `herdr.space=${local(space)}`, `herdr.tab=${tab}`];
 }
 
+// A message can be sent to an agent that is not waiting on a dialog: typed into one, it would
+// answer it. Never to a shell, where it would run.
+export const canReply = row => Boolean(row?.available && row.kind === "agent" && !row.inner && row.reported !== "blocked");
+
+// Sessions with nothing to say for over a day, which Clean up closes: not the one you are in,
+// a pinned one, or one with a goal or work still running.
+export const STALE_SESSION_MS = 24 * 3600 * 1000;
+export function stale(rows, now = Date.now()) {
+  return rows.filter(row => row.kind === "agent" && !row.inner && row.available && !row.pinned && !row.focused
+    && !row.background.length && !row.goal && ["idle", "done", "unknown"].includes(row.status)
+    && Boolean(row.since) && now - row.since > STALE_SESSION_MS);
+}
+
+// Claude Code sessions that ended since they were last seen, to offer again. `known`: address →
+// { title, cwd, machine, session } as last seen; `live`: the addresses of live terminals;
+// `ready`: the machines that answer (null: this computer). Only a terminal gone from a machine
+// that answers has ended: a parked pane, a machine that is away or a reload ends nothing.
+// Changes `known`.
+export function ended(known, live, ready) {
+  const out = [];
+  for (const [address, seen] of known) {
+    if (live.has(address) || !ready.has(seen.machine)) continue;
+    known.delete(address);
+    out.push(seen);
+  }
+  return out;
+}
+export const CLOSED_MAX = 8;
+export const remember = (closed, seen, now = Date.now()) =>
+  [{ ...seen, at: now }, ...(closed ?? []).filter(entry => entry.session !== seen.session)].slice(0, CLOSED_MAX);
+// Reopening one: Claude Code resumes it by its id, in the folder it worked in.
+export function resumeAction(entry, machines, spaces, focused) {
+  if (!/^[0-9A-Za-z-]+$/.test(entry?.session ?? "")) return null;
+  return newSessionAction(entry.machine ?? null, machines, spaces, focused, { run: ["claude", "--resume", entry.session] }, { folder: entry.cwd || undefined });
+}
+
 // Never use the active host implicitly: a local + must stay local while a remote tab is focused.
 // `folder`: where it starts (omitted: where the space's focused pane is, or the machine's home).
 // `space`: the space it joins as a tab, null for a new space; omitted, the focused space on

@@ -711,7 +711,7 @@ test("sessions of one status in the same folder get a folder heading; a lone one
     { address: "t4", state: "live", status: "working", title: "Build", program: { name: "Claude", agent: true }, cwd: "/Users/me/api" },
   ];
   const root = h.view.render();
-  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id), [
+  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id).filter(id => id !== "clean-up"), [
     "section-local:working", "agent-t4",
     "section-local:idle", "folder-local:idle:/Users/me/api", "agent-t1", "agent-t3", "agent-t2", "add-machine",
   ]);
@@ -736,7 +736,7 @@ test("expanded, sessions in one folder still sit together, under no heading: eac
   ];
   h.sharedState["agent-sidebar.density"] = "expanded";
   const root = h.view.render();
-  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id), [
+  assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id).filter(id => id !== "clean-up"), [
     "section-local:idle", "agent-t1", "agent-t3", "agent-t2", "add-machine",
   ]);
   assert.match(text(find(root, "agent-t1")), /~\/api/);
@@ -1185,4 +1185,91 @@ test("a working session says what it is doing, one that needs you what it wants;
   assert.match(text(find(h.view.render(), "agent-t1")), /Fix login Opus · xhigh/);
   h.view.width = 460;
   assert.match(text(find(h.view.render(), "agent-t1")), /Fix login Bash · Run the tests Opus · xhigh/);
+});
+
+test("a message typed under a row is sent to that agent; never to a shell, or to one waiting on a dialog", async () => {
+  const h = setup();
+  h.state.terminals.push({ address: "t9", state: "live", program: { name: "zsh", shell: true }, cwd: "/Users/me" });
+  let root = hover(h, "agent-t1");
+  find(root, "reply-to-t1").props.on_click(null, h.cx);
+  root = h.view.render();
+  const list = find(root, "host-agent-list").nodes.map(n => n.props.id);
+  assert.equal(list[list.indexOf("agent-t1") + 1], "reply-t1"); // the field sits under its row, only while writing
+  h.input.text = "  continue with the plan  ";
+  h.input.handlers.submit(null, h.cx);
+  assert.deepEqual(h.hcs, [["send", "t1", "continue with the plan"]]);
+  assert.equal(find(h.view.render(), "reply-t1"), null);
+  // Escape leaves it unsent; an empty message sends nothing.
+  find(hover(h, "agent-t1"), "reply-to-t1").props.on_click(null, h.cx);
+  h.view.render().props.on_key_down({ key: "escape" }, h.cx);
+  assert.equal(h.view.replying, null);
+  assert.deepEqual(h.commands, []); // and Escape went no further
+  find(hover(h, "agent-t1"), "reply-to-t1").props.on_click(null, h.cx);
+  h.input.text = "   ";
+  h.input.handlers.submit(null, h.cx);
+  assert.equal(h.hcs.length, 1);
+  // The remote agent is waiting on a dialog, where typing would answer it; a shell would run it.
+  assert.equal(find(hover(h, "agent-work/t1"), "reply-to-work/t1"), null);
+  assert.equal(find(hover(h, "agent-t9"), "reply-to-t9"), null);
+  // A send that fails says so.
+  h.hcFails("terminal is busy");
+  find(hover(h, "agent-t1"), "reply-to-t1").props.on_click(null, h.cx);
+  h.input.text = "hello";
+  h.input.handlers.submit(null, h.cx);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual([h.notes[0].title, h.notes[0].body], ["Could not send to Local task", "terminal is busy"]);
+});
+
+test("Clean up closes sessions idle for over a day, on a second click, and only those", () => {
+  const h = setup();
+  const day = 24 * 3600 * 1000;
+  const old = Date.now() - 2 * day;
+  h.state.machines = [{ name: null, layout: "ready" }];
+  const agent = (address, extra) => ({ address, state: "live", status: "idle", title: `Task ${address}`, program: { name: "Claude", agent: true }, status_ms: old, ...extra });
+  h.state.terminals = [agent("t1"), agent("t2", { status: "done" }), agent("t3", { status_ms: Date.now() - 3600000 }), agent("t4", { labels: { "herdr.pinned": "true" } }),
+    agent("t5", { status: "working" }), agent("t6"), { address: "t7", state: "live", program: { name: "zsh", shell: true }, created_ms: old }];
+  h.state.focused = { terminal: "t6" };
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "tb" }];
+  let root = h.view.render();
+  assert.match(text(find(root, "clean-up")), /Close 2 sessions idle for over a day/);
+  assert.equal(find(root, "clean-up").props.tooltip, "Task t2\nTask t1");
+  find(root, "clean-up").props.on_click(null, h.cx);
+  assert.deepEqual(h.commands, []);
+  root = h.view.render();
+  assert.match(text(find(root, "clean-up")), /Click again to close 2 sessions/);
+  find(root, "clean-up").props.on_click(null, h.cx); // a double click: too soon
+  assert.deepEqual(h.commands, []);
+  h.view.armedClean = Date.now() - 1000;
+  find(h.view.render(), "clean-up").props.on_click(null, h.cx);
+  assert.deepEqual(h.commands, [{ name: "terminal.kill", args: { terminal: "t2" } }, { name: "pane.close", args: { pane: "p1" } }]);
+  // Nothing that old: no row at all.
+  h.state.terminals = [agent("t3", { status_ms: Date.now() })];
+  assert.equal(find(h.view.render(), "clean-up"), null);
+});
+
+test("a Claude Code session that ended is kept to reopen: its terminal gone from a machine that answers", () => {
+  const h = setup();
+  h.view.work = new Map([["t1", { ...reading("claude-opus-5-5", "high"), id: "abc-123" }], ["work/t1", { ...reading("claude-opus-5-5", "high"), id: "def-456" }]]);
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "tb", cwd: "/Users/me/api" }];
+  h.view.render();
+  assert.equal(find(h.view.render(), "closed"), null);
+  // A machine that is away, or a pane that is parked, ends nothing.
+  h.state.machines[1].layout = "unavailable";
+  h.state.terminals = h.state.terminals.filter(t => t.address !== "work/t1");
+  h.state.panes = [];
+  h.view.render();
+  assert.equal(h.sharedState["agent-sidebar.closed"], undefined);
+  // Its terminal gone from this computer: ended.
+  h.state.terminals = [];
+  let root = h.view.render();
+  assert.deepEqual(h.sharedState["agent-sidebar.closed"].map(entry => [entry.title, entry.cwd, entry.machine, entry.session]), [["Local task", "/Users/me/api", null, "abc-123"]]);
+  // Folded until asked for; a click reopens it where it worked, and takes it off the list.
+  assert.match(text(find(root, "closed")), /Recently closed\s*1/);
+  assert.equal(find(root, "closed-abc-123"), null);
+  find(root, "closed").props.on_click(null, h.cx);
+  root = h.view.render();
+  find(root, "closed-abc-123").props.on_click(null, h.cx);
+  assert.deepEqual(h.commands, [{ name: "space.new", args: { name: undefined, argv: ["claude", "--resume", "abc-123"], folder: "/Users/me/api", machine: "" } }]);
+  assert.deepEqual(h.sharedState["agent-sidebar.closed"], []);
+  assert.equal(find(h.view.render(), "closed"), null);
 });
