@@ -89,6 +89,8 @@ A machine's **+** opens a launcher: a folder at the top, what to start below.
 - **Where it opens:** a folder with a terminal of one of the machine's spaces in it gets a new
   tab in that space; any other gets a new space of its own. The switch beside "Start in" changes
   that, and stays as you set it while you move between folders.
+- **Which machine:** with more than one connected, the header shows each as a tab. Click one,
+  or press ⇥, to start there instead; what you typed stays and searches that machine's folders.
 - **What starts:** the highlighted program, marked ↵: at first the one you started last on that
   machine. Click any program to start it.
 
@@ -97,9 +99,10 @@ All of it works from the keyboard, without leaving the search field:
 | Key | Does |
 | --- | --- |
 | Type | Search folders, or type a path |
+| ⇥ / ⇧⇥ | Move to the next or previous machine (what you typed searches there) |
 | ↑ ↓ | Choose the folder |
 | `/` | Go into the folder chosen |
-| ⇥ / ⇧⇥ | Choose the program |
+| ⌥↑ / ⌥↓ | Choose the program |
 | ↵ | Start it (a double click on a folder does too) |
 | ⌥1 … ⌥9 | Start the program in that place at once (⌥1 is Shell) |
 | ⌘O | Choose a folder in the system's picker (this computer) |

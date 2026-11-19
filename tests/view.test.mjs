@@ -38,6 +38,7 @@ function setup(initial = {}, saved = {}) {
         if (key === "child") data.nodes.push(args[0]);
         else if (key === "children") data.nodes.push(...args[0]);
         else if (key === "when") { if (args[0]) args[1](proxy); }
+        else if (key === "on_action") (data.props.actions ??= {})[args[0]] = args[1];
         else data.props[key] = args.length === 1 ? args[0] : args;
         return proxy;
       };
@@ -50,7 +51,8 @@ function setup(initial = {}, saved = {}) {
   // Tasks started with cx.spawn run when a launcher test awaits h.settle(). The sidebar's own
   // never end, so its tests leave them queued.
   const tasks = [];
-  const cx = { notify() {}, stop_propagation() {}, spawn(f) { tasks.push(f); }, focus_handle() { return { focus() {} }; }, timer: { every(ms) { timers.push(ms); } } };
+  const bound = [];
+  const cx = { notify() {}, stop_propagation() {}, bind_keys(list) { bound.push(...list); return list.length; }, spawn(f) { tasks.push(f); }, focus_handle() { return { focus() {} }; }, timer: { every(ms) { timers.push(ms); } } };
   // Each view gets its own storage, as each Herdr mod copy does.
   const storage = { data: { ...saved }, getItem(k) { return this.data[k] ?? null; }, setItem(k, v) { this.data[k] = String(v); } };
   const imports = {
@@ -75,13 +77,14 @@ function setup(initial = {}, saved = {}) {
   Object.assign(imports, new Function(...Object.keys(imports), `${settingsSource}\nreturn { initSettings, renderSettings, SETTINGS };`)(...Object.values(imports)));
   const source = readFileSync(new URL("../mods/agent-sidebar/main.js", import.meta.url), "utf8").replace(/^import [\s\S]*?;$/gm, "").replace("export default class", "return class");
   const View = new Function(...Object.keys(imports), source)(...Object.values(imports));
+  delete globalThis.sessionLauncherKeys; // each test is a fresh app: its keymap is empty
   const view = new View();
   // GPUI init receives its own props; Herdr supplies overlay props through herdr.props().
   view.init({}, cx);
   const settle = async () => { while (tasks.length) await tasks.shift()(cx); };
   return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, settle, hcs, notes, hcFails: stderr => { hcResult = { code: 1, stdout: "", stderr }; }, reads, file: text => { textFile = text; },
     answer: f => { execResult = f; }, agents: list => { agentList = list; }, pick: path => { picked = path; },
-    order: () => order, scrollTo: () => scrollTo };
+    order: () => order, scrollTo: () => scrollTo, bound };
 }
 // The svg glyphs under a node, by their file.
 const glyphs = node => !node || typeof node !== "object" ? [] : [...(node.props.src ? [node] : []), ...node.nodes.flatMap(glyphs)];
@@ -438,12 +441,12 @@ test("Claude Code's own sub-agents sit under their session, open it, and count a
   const sub = find(root, "agent-t1#a1");
   assert.ok(sub.props.pl > parent.props.pl);
   assert.match(parent.props.tooltip, /Sub-agent: Review the repo/);
-  assert.match(sub.props.tooltip, /^Review the repo\nSub-agent, in the background · general-high\nLocal · This computer\nWorking · 3m/);
+  assert.match(sub.props.tooltip, /^Review the repo\nSub-agent, in the background · general-high\nLocal\nWorking · 3m/);
   assert.match(text(sub), /Review the repo general-high 3m/);
   // Counted as part of its session, and not a terminal for next/previous agent.
   assert.equal(text(find(root, "sessions-count")), "2");
   assert.match(text(find(root, "section-local:working")), /Working 1/);
-  assert.match(text(find(root, "host-local")), /LOCAL 1/);
+  assert.match(text(find(root, "host-local")), /^\s*Local 1/);
   assert.deepEqual(h.order(), ["t1", "work/t1"]);
   // No pin on hover; a click opens the session.
   sub.props.on_hover(true, h.cx);
@@ -551,22 +554,106 @@ test("/ after a search goes into the folder chosen; after the folder itself it i
   assert.equal(h.input.text, "~/");
 });
 
-test("Tab moves Enter's program through the list and back; it shows which", async () => {
+test("Option-Up and Option-Down move Enter's program through the list and back; it shows which", async () => {
   const h = launcherSetup();
   h.agents([claude, { key: "codex", name: "Codex", run: ["codex"], installed: true }]);
   await h.settle();
-  const tab = shift => h.view.render().props.on_key_down({ key: "tab", keystroke: shift ? "shift-tab" : "tab", modifiers: { shift } }, h.cx);
+  const step = up => h.view.render().props.on_key_down({ key: up ? "up" : "down", keystroke: up ? "alt-up" : "alt-down", modifiers: { alt: true } }, h.cx);
   let root = h.view.render();
   assert.equal(find(root, "launch-shell").props.aria_selected, true); // nothing started yet: a shell
-  tab(false);
-  tab(false);
+  step(false);
+  step(false);
   root = h.view.render();
   assert.equal(find(root, "launch-codex").props.aria_selected, true);
   assert.match(text(find(root, "launch-codex")), /↵/);
-  tab(false); // wraps
-  tab(true); // and back
+  assert.equal(find(root, "folder-0").props.aria_selected, true); // the folder stays
+  step(false); // wraps
+  step(true); // and back
   h.input.handlers.submit();
   assert.deepEqual(h.commands, [{ name: "tab.new", args: { name: "Codex", argv: ["codex"], folder: "/Users/me/api/server", space: "s1" } }]);
+});
+
+test("Tab moves the launcher to the next ready machine and back; what is typed searches there", async () => {
+  const h = launcherSetup();
+  h.state.machines.push({ name: "gone", layout: "unavailable" }, { name: "lab", layout: "ready" });
+  const asked = [];
+  h.answer(async (_cmd, args, opts) => {
+    if (args[1].includes("cd \"$d\"")) {
+      asked.push([args[3], opts.on]);
+      return { code: 0, stdout: `/home/me\n/home/me/src\n${opts.on ?? "local"}-app\n`, stderr: "" };
+    }
+    return { code: 1, stdout: "", stderr: "" };
+  });
+  await h.settle();
+  // The window's own ⇥ binding would take the key first: the launcher binds it in its context.
+  assert.deepEqual(h.bound.filter(k => k.context === "SessionLauncher").map(k => k.keystroke), ["tab", "shift-tab"]);
+  const tab = shift => {
+    const root = h.view.render();
+    assert.equal(root.props.key_context, "SessionLauncher");
+    const binding = h.bound.find(k => k.keystroke === (shift ? "shift-tab" : "tab"));
+    root.props.actions[binding.action](null, h.cx);
+  };
+  let root = h.view.render();
+  // Only ready machines are tabs; the one shown is selected.
+  assert.deepEqual(ids(find(root, "launcher-machines")).filter(id => id.startsWith("machine-")), ["machine-local", "machine-work", "machine-lab"]);
+  assert.equal(find(root, "machine-local").props.aria_selected, true);
+  assert.match(text(root), /⇥ machine/);
+  h.input.text = "~/src/";
+  h.input.handlers.change(null, h.cx);
+  await h.settle();
+  tab(false);
+  root = h.view.render();
+  assert.equal(h.view.machine, "work");
+  assert.equal(find(root, "machine-work").props.aria_selected, true);
+  assert.equal(find(root, "launcher-browse"), null); // the system's picker is this computer's
+  await h.settle();
+  // The typed path is listed again, on that machine.
+  assert.deepEqual(asked, [["~/src", null], ["~/src", "work"]]);
+  root = h.view.render();
+  assert.deepEqual(folderPaths(root), ["~/src", "~/src/work-app"]);
+  find(root, "folder-1").props.on_click(null, h.cx);
+  find(h.view.render(), "launch-shell").props.on_click();
+  assert.deepEqual(h.commands, [{ name: "space.new", args: { folder: "/home/me/src/work-app", machine: "work" } }]);
+  tab(false); // skips the unavailable one
+  assert.equal(h.view.machine, "lab");
+  tab(false); // wraps
+  assert.equal(h.view.machine, null);
+  tab(true); // and back
+  assert.equal(h.view.machine, "lab");
+});
+
+test("a click on a machine in the header moves the launcher there; a late answer from the last one is kept, not shown", async () => {
+  const h = launcherSetup();
+  h.agents([claude]);
+  // Each machine's projects: this computer's scan answers only after the move.
+  h.answer(async (_cmd, args, opts) => args[1].includes("$HOME/workspace")
+    ? { code: 0, stdout: opts.on ? "/home/me\n/home/me/workspace/remote-app\n" : "/Users/me\n/Users/me/workspace/local-app\n", stderr: "" }
+    : { code: 1, stdout: "", stderr: "" });
+  find(h.view.render(), "machine-work").props.on_click(null, h.cx);
+  let root = h.view.render();
+  assert.equal(h.view.machine, "work");
+  assert.equal(find(root, "machine-work").props.aria_selected, true);
+  assert.equal(find(root, "machine-work").props.on_click, undefined); // already there
+  await h.settle();
+  root = h.view.render();
+  assert.ok(folderPaths(root).includes("~/workspace/remote-app"));
+  assert.ok(!folderPaths(root).some(path => path.includes("local-app")));
+  assert.ok(find(root, "launch-claude"));
+  // Both answers are kept for the next launcher, each under its machine.
+  assert.deepEqual(Object.keys(h.sharedState["agent-sidebar.scan"] ?? {}).sort(), ["", "work"]);
+  // Back on this computer, its own answer shows at once.
+  find(root, "machine-local").props.on_click(null, h.cx);
+  assert.ok(folderPaths(h.view.render()).includes("~/workspace/local-app"));
+});
+
+test("with one machine the launcher shows it plainly, without tabs", () => {
+  const h = launcherSetup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  const root = h.view.render();
+  assert.equal(find(root, "launcher-machines"), null);
+  assert.match(text(root), /Local/);
+  assert.doesNotMatch(text(root), /LOCAL/);
+  assert.doesNotMatch(text(root), /⇥ machine/);
 });
 
 test("a typed folder that is not there says so and starts nothing", async () => {
@@ -576,7 +663,7 @@ test("a typed folder that is not there says so and starts nothing", async () => 
   h.input.handlers.change(null, h.cx);
   await h.settle();
   const root = h.view.render();
-  assert.match(text(root), /No folder \/nope on this computer/);
+  assert.match(text(root), /No folder \/nope on Local/);
   find(root, "launch-shell").props.on_click();
   assert.deepEqual(h.commands, []);
 });
@@ -693,7 +780,7 @@ test("with only this computer there is no host heading, and its + moves to the t
   assert.equal(list.nodes[1].props.id, "agent-t1");
   assert.deepEqual(h.order(), ["t1"]);
   assert.equal(list.props.accessibility_label, "Sessions grouped by status");
-  assert.doesNotMatch(h.view.tip(h.view.rows[0], Date.now()), /This computer/);
+  assert.doesNotMatch(h.view.tip(h.view.rows[0], Date.now()), /^Local$/m);
   find(root, "new-local").props.on_click(null, h.cx);
   assert.equal(h.overlays.at(-1).props.machine, null);
   // The rail keeps a + of its own at the top of the list.

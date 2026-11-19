@@ -11,7 +11,7 @@ test("local and remote IDs stay distinct even when the terminal numbers match", 
   const rows = build(world());
   assert.equal(rows.length, 2);
   assert.deepEqual(groups(rows, hosts).map(g => [g.label, g.remote, g.rows[0].address]), [
-    ["This computer", false, "t1"], ["work", true, "work/t1"],
+    ["Local", false, "t1"], ["work", true, "work/t1"],
   ]);
 });
 
@@ -64,7 +64,7 @@ test("unavailable hosts come last, cannot open stale rows, and never imply a con
   assert.equal(openAction(rows.find(r => r.machine)), null);
   // This computer, the machines that can be reached by name, then the ones that can't.
   assert.deepEqual(groups(rows, machines).map(g => [g.label, g.layout]), [
-    ["This computer", "ready"], ["studio", "loading"], ["zeta", "ready"], ["away", "unavailable"], ["work", "unavailable"],
+    ["Local", "ready"], ["studio", "loading"], ["zeta", "ready"], ["away", "unavailable"], ["work", "unavailable"],
   ]);
 });
 
@@ -129,7 +129,7 @@ test("a click focuses a pane using its exact machine-qualified ID or peeks an ou
 });
 
 test("empty startup still shows local loading; duplicate task names do not merge agents", () => {
-  assert.deepEqual(groups([], []).map(g => [g.label, g.layout]), [["This computer", "loading"]]);
+  assert.deepEqual(groups([], []).map(g => [g.label, g.layout]), [["Local", "loading"]]);
   assert.equal(build(world({ terminals: [terminal("t1"), terminal("t2")] })).length, 2);
 });
 

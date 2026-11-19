@@ -337,7 +337,7 @@ export function groups(rows, machines, by = "status", spaces = []) {
     const sections = sectionize(mine, by, spaces.filter(space => (space.machine ?? null) === (host.name ?? null)));
     return {
       ...host, key: host.name == null ? "local" : `remote:${host.name}`,
-      label: host.name ?? "This computer", remote: host.name != null,
+      label: host.name ?? "Local", remote: host.name != null,
       sections,
       // Display order: section by section, sub-agents under their parents.
       rows: sections.flatMap(section => section.entries.map(entry => entry.row)),

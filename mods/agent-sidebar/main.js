@@ -484,7 +484,7 @@ export default class AgentSidebar extends View {
     const forget = entry => setShared(CLOSED_KEY, (this.x.shared(CLOSED_KEY) ?? []).filter(other => other.session !== entry.session));
     return [heading, ...closed.map(entry => h_flex().id(`closed-${entry.session}`).h(26).flex_none().rounded(6).pl(8).pr(6).gap(8).items_center()
       .role("button").accessibility_label(`Reopen ${entry.title}`).cursor_pointer().hover(s => s.bg(t.hover))
-      .tooltip([`Reopen ${entry.title}`, this.single ? "" : entry.machine ?? "This computer", entry.cwd, `claude --resume ${entry.session}`].filter(Boolean).join("\n"))
+      .tooltip([`Reopen ${entry.title}`, this.single ? "" : entry.machine ?? "Local", entry.cwd, `claude --resume ${entry.session}`].filter(Boolean).join("\n"))
       .on_click((_e, cx) => {
         const action = resumeAction(entry, this.x.machines(), this.x.spaces(), this.x.focused());
         if (!action) return;
@@ -757,7 +757,7 @@ export default class AgentSidebar extends View {
 
   tip(row, now) {
     // With one machine there is nothing to tell apart.
-    const host = this.single ? "" : row.machine == null ? "Local · This computer" : `Remote · ${row.machine}`;
+    const host = this.single ? "" : row.machine == null ? "Local" : `Remote · ${row.machine}`;
     const kind = row.inner ? (row.inBackground ? "Sub-agent, in the background" : "Sub-agent")
       : row.kind === "shell" ? "Shell" : row.kind === "process" ? "Program" : "Agent";
     const context = [...new Set([kind, row.space === row.title ? "" : row.space, row.program?.name].filter(Boolean))].join(" · ");
@@ -1134,7 +1134,7 @@ export default class AgentSidebar extends View {
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().min_w(0).truncate().font_semibold().text_size(12).text_color(t.foreground).child(group.label))
-          .child(div().flex_none().px(4).py(1).rounded(4).bg(t.raised).text_size(8.5).font_semibold().text_color(color).child(group.remote ? "REMOTE" : "LOCAL")))
+          .when(group.remote, el => el.child(div().flex_none().px(4).py(1).rounded(4).bg(t.raised).text_size(8.5).font_semibold().text_color(color).child("REMOTE"))))
         .when(Boolean(state), el => el.child(div().text_size(10).text_color(group.layout === "loading" ? t.muted : t.blocked).child(state))))
       .when(!open, el => el.children(this.summary(t, group)))
       .child(div().flex_none().min_w(14).text_size(10.5).text_color(t.muted).text_right().child(String(counts(group.rows).all)))
@@ -1220,7 +1220,7 @@ export default class AgentSidebar extends View {
     this.expanded = this.x.shared(DENSITY_KEY) === "expanded";
     // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
     this.single = !hosts.some(host => host.name != null);
-    const local = { layout: "loading", ...hosts.find(host => host.name == null), name: null, key: "local", label: "This computer" };
+    const local = { layout: "loading", ...hosts.find(host => host.name == null), name: null, key: "local", label: "Local" };
     this.visible = [];
     this.positions = new Map();
     const children = [];
