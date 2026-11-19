@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, organizeBrief, organizePlan, latestCodex, organizeAnswer, ORGANIZE_SCHEMA, activityText, tokens, stale, ended, remember, resumeAction, canReply, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, organizeBrief, organizePlan, latestCodex, organizeAnswer, ORGANIZE_SCHEMA, activityText, tokens, stale, ended, remember, resumeAction, canReply, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS , statFigures, statsText } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -384,4 +384,19 @@ test("Codex is given the latest model of a family, from its own list; either one
   const closed = schema => schema.type !== "object" ? (schema.items ? closed(schema.items) : true)
     : schema.additionalProperties === false && Object.keys(schema.properties).every(key => schema.required.includes(key) && closed(schema.properties[key]));
   assert.ok(closed(ORGANIZE_SCHEMA));
+});
+
+test("a machine's figures are quiet until one runs high; memory goes by its pressure where it has one", () => {
+  const GB = 2 ** 30;
+  const said = r => statFigures(r).map(f => `${f.key} ${f.text} ${f.level}`);
+  assert.deepEqual(said({ cpu: 0.234, used: 52 * GB, total: 64 * GB, pressure: 0.3 }), ["cpu 23% 0", "memory 81% 0"]); // a Mac, mostly in use, not short
+  assert.deepEqual(said({ cpu: 0.7, used: 20 * GB, total: 32 * GB, pressure: 0.52 }), ["cpu 70% 1", "memory 63% 1"]);
+  assert.deepEqual(said({ cpu: 0.95, used: 30 * GB, total: 32 * GB, pressure: 0.8 }), ["cpu 95% 2", "memory 94% 2"]);
+  // No pressure (Linux): how much is used decides.
+  assert.deepEqual(said({ cpu: null, used: 26 * GB, total: 32 * GB, pressure: null }), ["memory 81% 1"]);
+  assert.deepEqual(said({ cpu: 0.1, used: null, total: null, pressure: null }), ["cpu 10% 0"]);
+  assert.deepEqual([statFigures(null), statsText(null)], [[], ""]);
+  assert.equal(statsText({ cpu: 0.45, used: 52.1 * GB, total: 64 * GB, pressure: 0.33 }), "CPU 45% · Memory 52.1 of 64 GB (81%), pressure 33%");
+  assert.equal(statsText({ cpu: null, used: 97 * GB, total: 128 * GB, pressure: null }), "Memory 97 of 128 GB (76%)");
+  assert.equal(statsText({ cpu: 0.05, used: 0.6 * GB, total: 1 * GB, pressure: null }), "CPU 5% · Memory 0.6 of 1 GB (60%)");
 });

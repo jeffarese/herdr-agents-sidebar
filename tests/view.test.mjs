@@ -63,7 +63,7 @@ function setup(initial = {}, saved = {}) {
     focused: () => state.focused, theme: () => new Proxy({}, { get: () => "#aabbcc" }), settings: () => ({ zoom: 1 }),
     run: (name, args) => commands.push({ name, args }), setAgentOrder: addresses => { order = addresses; }, nextCommand: () => new Promise(() => {}),
     openOverlay: spec => overlays.push(spec), closeOverlay() {}, props: () => ({ ...initial, overlay: "popup" }), knownAgents: async () => agentList,
-    home: () => "/Users/me", pickFolder: async () => picked,
+    home: () => "/Users/me", pickFolder: async () => picked, window: () => ({ platform: "macos" }),
     localStorage: storage, shared: key => sharedState[key], setShared: (key, value) => { sharedState[key] = value; },
     updates: () => ({ app: { ready: null } }),
     exec: (...args) => { execs.push(args); return execResult(...args); },
@@ -1573,7 +1573,7 @@ test("the gear's window is the sidebar's settings, in tabs: every choice is shar
     }
     return null;
   };
-  assert.deepEqual(tabs.map(tab => { find(h.view.render(), `tab-${tab}`).props.on_click(null, h.cx); return ids(find(h.view.render(), "sidebar-settings-list")).filter(id => /^set-[a-zA-Z]+$/.test(id)).length; }), [4, 7, 8, 4]);
+  assert.deepEqual(tabs.map(tab => { find(h.view.render(), `tab-${tab}`).props.on_click(null, h.cx); return ids(find(h.view.render(), "sidebar-settings-list")).filter(id => /^set-[a-zA-Z]+$/.test(id)).length; }), [4, 8, 8, 4]);
   find(h.view.render(), "tab-layout").props.on_click(null, h.cx);
   root = h.view.render();
   // Rows and grouping, each one of a few.
@@ -1584,7 +1584,7 @@ test("the gear's window is the sidebar's settings, in tabs: every choice is shar
   assert.equal(at("set-group-project").props.aria_selected, true);
   // Every switch is there, on by default; a click turns it off, another back on.
   const keys = Object.keys(model.DEFAULTS).filter(key => typeof model.DEFAULTS[key] === "boolean");
-  assert.equal(keys.length, 17);
+  assert.equal(keys.length, 18);
   // Organize asks Claude Code or Codex, each with the families it has.
   assert.ok(at("set-organizeModel-sonnet") && !at("set-organizeCodex-terra"));
   at("set-organizeWith-codex").props.on_click(null, h.cx);
@@ -1756,4 +1756,95 @@ test("the example copy shows example sessions, asks no machine anything, and hol
   const all = JSON.stringify([...demos.demo(0).work, demos.demo(0).terminals, demos.demo(0).panes, demos.demo(0).shared]);
   // Every folder in it is an example's: under /Users/me or /home/me.
   assert.deepEqual((all.match(/\/(?:Users|home)\/[^/"]+/g) ?? []).filter(home => !["/Users/me", "/home/me"].includes(home)), []);
+});
+
+test("each machine's heading says how busy it is, from herdr-stats here while it runs, and asks nothing when it can't show it", async () => {
+  const h = setup();
+  const GB = 2 ** 30;
+  h.state.machines.push({ name: "attic", layout: "unavailable" });
+  h.view.width = 372;
+  const figures = (root, key) => text(find(root, `stats-${key}`)).replace(/\s+/g, " ").trim();
+  let root = h.view.render();
+  assert.equal(find(root, "stats-local"), null); // nothing read yet
+  assert.deepEqual(h.view.headed, [null, "work"]); // not the one that is away
+  h.file(JSON.stringify({ v: 1, t: Date.now(), cpu: { total: 0.18 }, mem: { used: 21.4 * GB, total: 32 * GB, pressure: 0.12 } }));
+  h.answer(async (_cmd, args) => ({ code: 0, stderr: "", stdout: args[1] === background.STATS ? `U 86 ${28 * GB} ${32 * GB} 52\n` : "" }));
+  let answers = 0;
+  h.view.askStats(() => answers++);
+  await settle();
+  // This computer's come from herdr-stats' snapshot, running nothing; the other's are measured there.
+  assert.deepEqual(h.reads, ["/Users/me/Library/Caches/herdr-stats/snapshot.json"]);
+  assert.deepEqual(h.execs.map(([cmd, args, opts]) => [cmd, args[1] === background.STATS, opts.on]), [["sh", true, "work"]]);
+  assert.equal(answers, 2);
+  root = h.view.render();
+  assert.equal(figures(root, "local"), "18% 67%");
+  assert.equal(figures(root, "remote:work"), "86% 88%");
+  assert.deepEqual(glyphs(find(root, "stats-remote:work")).map(g => g.props.src.split("/").pop()), ["cpu.svg", "memory.svg"]);
+  assert.match(find(root, "host-remote:work").props.tooltip, /\nCPU 86% · Memory 28 of 32 GB \(88%\), pressure 52%$/);
+  assert.equal(find(root, "stats-remote:work").props.tooltip, "CPU 86% · Memory 28 of 32 GB (88%), pressure 52%");
+  assert.match(find(root, "host-local").props.accessibility_label, /, CPU 18% · Memory 21\.4 of 32 GB \(67%\), pressure 12%, expanded$/);
+  // Not asked again before it is due.
+  h.view.askStats(() => answers++);
+  assert.equal(h.execs.length + h.reads.length, 2);
+  // Ten seconds on, with herdr-stats' sampler stopped: this computer is measured too. The same
+  // figures again draw nothing new.
+  h.file(JSON.stringify({ v: 1, t: Date.now() - 60000, cpu: { total: 0.5 } }));
+  for (const state of h.view.stats.values()) state.asked = Date.now() - background.STATS_MS;
+  h.view.askStats(() => answers++);
+  await settle();
+  assert.deepEqual(h.execs.slice(1).map(([, , opts]) => opts.on).sort(), [null, "work"]);
+  assert.equal(answers, 3);
+  assert.equal(figures(h.view.render(), "local"), "86% 88%");
+  // A machine that answers slowly is not asked twice meanwhile.
+  h.answer(() => new Promise(() => {}));
+  for (const state of h.view.stats.values()) state.asked = 0;
+  h.view.askStats(() => answers++);
+  h.view.stats.get("work").asked = 0;
+  h.view.askStats(() => answers++);
+  await settle();
+  assert.equal(h.execs.filter(([, , opts]) => opts.on === "work").length, 3);
+  // One that stopped answering keeps its figures a while, then shows none.
+  h.view.stats.get("work").reading.at = Date.now() - background.STATS_STALE_MS - 1;
+  root = h.view.render();
+  assert.equal(find(root, "stats-remote:work"), null);
+  assert.doesNotMatch(find(root, "host-remote:work").props.tooltip, /CPU/);
+  // Narrower, memory goes first, then CPU; the tooltip keeps both.
+  h.view.stats.get("work").reading.at = Date.now();
+  h.view.width = 250;
+  assert.deepEqual(ids(find(h.view.render(), "stats-remote:work")).filter(id => id.startsWith("stat-")), ["stat-remote:work-cpu"]);
+  h.view.width = 215;
+  root = h.view.render();
+  assert.equal(find(root, "stats-remote:work"), null);
+  assert.match(find(root, "host-remote:work").props.tooltip, /CPU 86%/);
+  // No figures, nothing asked: in a rail, by project (no machine headings), with one machine,
+  // or turned off.
+  h.view.width = 100;
+  h.view.render();
+  assert.deepEqual(h.view.headed, []);
+  h.view.width = 372;
+  h.sharedState["agent-sidebar.group"] = "project";
+  h.view.render();
+  assert.deepEqual(h.view.headed, []);
+  h.sharedState["agent-sidebar.group"] = "status";
+  h.sharedState["agent-sidebar.settings"] = { stats: false };
+  root = h.view.render();
+  assert.deepEqual([find(root, "stats-local"), find(root, "stats-remote:work")], [null, null]);
+  assert.doesNotMatch(find(root, "host-local").props.tooltip, /CPU/);
+  const before = [h.execs.length, h.reads.length];
+  for (const state of h.view.stats.values()) state.asked = 0;
+  h.view.askStats(() => answers++);
+  assert.deepEqual([h.execs.length, h.reads.length, h.view.stats.size], [...before, 0]);
+  h.sharedState["agent-sidebar.settings"] = {};
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.view.render();
+  assert.deepEqual(h.view.headed, []);
+});
+
+test("asking for an organization leaves each machine's clock alone, so the looks go on", async () => {
+  const h = setup();
+  h.answer(async () => ({ code: 1, stderr: "no", stdout: "" }));
+  find(h.view.render(), "organize").props.on_click(null, h.cx);
+  await settle();
+  assert.ok(h.view.asked instanceof Map);
+  assert.doesNotThrow(() => h.view.probe(() => {}));
 });

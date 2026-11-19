@@ -1,8 +1,8 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder, readTextFile, home } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, latestCodex, organizeAnswer, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving } from "./model.js";
-import { PROBE, PROBE_MS, KIND, CHANGES, PULLS, parseChanges, parsePulls, machineKind, parseProbe, probeArgs, probeTargets, workOf, signature } from "./background.js";
+import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder, readTextFile, home, window } from "herdr";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, latestCodex, organizeAnswer, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving, statFigures, statsText } from "./model.js";
+import { PROBE, PROBE_MS, KIND, CHANGES, PULLS, STATS, STATS_MS, STATS_STALE_MS, parseChanges, parsePulls, machineKind, parseProbe, parseStats, snapshotStats, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 import { initSettings, renderSettings, SETTINGS } from "./settings.js";
 import { demo } from "./demo.js";
@@ -84,6 +84,12 @@ const HEIGHT = { host: 30, hostState: 10, hostGap: 6, away: 24, section: 22, fol
 const hostHeight = (group, first, firstAway) => isAway(group) ? HEIGHT.away + (firstAway && !first ? HEIGHT.hostGap : 0)
   : HEIGHT.host + (hostState(group) ? HEIGHT.hostState : 0) + (first ? 0 : HEIGHT.hostGap);
 const NEWS = new Set(["blocked", "done"]);
+// A machine's figures (model.js statFigures), each a glyph, a gap and "100%" at most, and the
+// gap between two.
+const STAT_WIDTH = 34;
+const STAT_GAP = 7;
+// What a reading shows, without its time: the heading redraws only when this changes.
+const statsKey = r => r ? statFigures(r).map(f => `${f.key}:${f.text}:${f.level}`).join(" ") : "";
 // Per-copy conveniences only (folded hosts and sections). Storage can be missing or throw.
 const store = {
   get(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
@@ -120,9 +126,9 @@ export default class AgentSidebar extends View {
     this.pending = [];
     // New spaces a move makes, to name once Herdr shows them: { id, name, at }.
     this.naming = [];
-    // The suggestion for the spaces (Claude's or Codex's, `asked`): null, "asking", or
+    // The suggestion for the spaces (Claude's or Codex's, `asker`): null, "asking", or
     // { renames, moves } to apply.
-    this.asked = "Claude";
+    this.asker = "Claude";
     this.plan = null;
     // The moves of that suggestion the person took out, and which asking an answer is for.
     this.skip = new Set();
@@ -188,7 +194,8 @@ export default class AgentSidebar extends View {
     this.stale = new Set(); // machines to ask again as soon as allowed
     this.kinds = new Map(); // machine → true once it said what it is, else when it was asked
     this.git = new Map(); // machine → { changes, pulls: folder → what git and GitHub said, asked, pulled: when }
-    if (example) Object.assign(this, { work: example.work, git: example.git });
+    this.stats = new Map(); // machine → { reading: how busy it was (background.js STATS), asked: when, asking }
+    if (example) Object.assign(this, { work: example.work, git: example.git, stats: example.stats });
     cx.spawn(async cx => {
       let wake = () => {};
       for (;;) {
@@ -196,6 +203,7 @@ export default class AgentSidebar extends View {
           this.probe(() => wake());
           this.askKinds(() => wake());
           this.askGit(() => wake());
+          this.askStats(() => wake());
           this.finishMoves();
         }
         // A second, or less when an answer arrives or a move is under way.
@@ -297,6 +305,38 @@ export default class AgentSidebar extends View {
         ask(PULLS, branches, 30000, out => { state.pulls = parsePulls(out, branches); });
       }
     }
+  }
+
+  // Asks each machine whose heading shows (render's `this.headed`) how busy it is, every
+  // STATS_MS: nothing while the figures are off, in a rail, or with no machine headings. This
+  // computer's are herdr-stats' own when its sampler runs, read from its snapshot; otherwise,
+  // and on every other machine, the STATS script measures them.
+  askStats(answered) {
+    const due = this.cfg.stats ? this.headed ?? [] : [];
+    for (const machine of [...this.stats.keys()]) if (!due.includes(machine)) this.stats.delete(machine);
+    const now = Date.now();
+    for (const machine of due) {
+      if (!this.stats.has(machine)) this.stats.set(machine, { reading: null, asked: 0, asking: false });
+      const state = this.stats.get(machine);
+      if (state.asking || now - state.asked < STATS_MS) continue;
+      Object.assign(state, { asked: now, asking: true });
+      this.measure(machine).then(reading => {
+        if (!reading) return;
+        const before = statsKey(state.reading);
+        state.reading = reading;
+        if (statsKey(reading) !== before) { this.changed = true; answered(); }
+      }).catch(() => { /* asked again later; the last reading goes stale */ }).finally(() => { state.asking = false; });
+    }
+  }
+
+  async measure(machine) {
+    if (machine == null) {
+      const cache = window()?.platform === "macos" ? "Library/Caches" : ".cache";
+      const snap = snapshotStats(await readTextFile(`${home()}/${cache}/herdr-stats/snapshot.json`).catch(() => null));
+      if (snap) return snap;
+    }
+    const result = await exec("sh", ["-c", STATS], { on: machine, timeout: 10000 });
+    return result.code === 0 ? parseStats(result.stdout) : null;
   }
 
   // The launcher: a folder, then a shell or an agent to start there. At the pointer from a +,
@@ -515,7 +555,7 @@ export default class AgentSidebar extends View {
     const failed = why => { if (ask !== this.asks) return; this.plan = null; notify({ title: "Could not organize the sessions", body: String(why ?? "").trim().slice(0, 200), level: "warning" }); };
     const cfg = this.cfg;
     const codex = cfg.organizeWith === "codex";
-    const who = this.asked = ASKED[cfg.organizeWith];
+    const who = this.asker = ASKED[cfg.organizeWith];
     const schema = JSON.stringify(ORGANIZE_SCHEMA);
     // Codex is given the latest model of the family chosen, as its own list has it.
     const asking = !codex ? exec("sh", ["-c", ORGANIZE_SH, "sh", ...organizeArgs(cfg), "--json-schema", schema, "--system-prompt", ORGANIZE_SYSTEM, prompt], { on: null, timeout: 120000 })
@@ -555,7 +595,7 @@ export default class AgentSidebar extends View {
     const asking = this.plan === "asking";
     const codex = this.cfg.organizeWith === "codex";
     const model = codex ? (this.cfg.organizeCodex === "auto" ? "its own model" : `latest ${this.cfg.organizeCodex}`) : this.cfg.organizeModel;
-    const tip = asking ? `Asking ${this.asked}…` : `Organize into spaces with ${ASKED[this.cfg.organizeWith]} (${model}, ${this.cfg.organizeEffort} effort): previews, then asks`;
+    const tip = asking ? `Asking ${this.asker}…` : `Organize into spaces with ${ASKED[this.cfg.organizeWith]} (${model}, ${this.cfg.organizeEffort} effort): previews, then asks`;
     return div().id("organize").size(26).flex_none().rounded(6).flex().items_center().justify_center()
       .role("button").accessibility_label(tip).cursor_pointer().text_color(asking ? t.accent : t.muted)
       .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
@@ -576,7 +616,7 @@ export default class AgentSidebar extends View {
     if (!preview) {
       return box.child(h_flex().gap(7).items_center()
         .child(glyph("sparkles", 13).text_color(t.accent).loop("opacity", { from: 0.35, to: 1, period: 1100 }))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child(`Asking ${this.asked} how to arrange them…`))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child(`Asking ${this.asker} how to arrange them…`))
         .child(button("plan-dismiss", "Cancel", false, dismiss)));
     }
     const count = (n, one, many) => n ? `${n} ${n === 1 ? one : many}` : "";
@@ -585,7 +625,7 @@ export default class AgentSidebar extends View {
     return box
       .child(h_flex().gap(7).items_center()
         .child(glyph("sparkles", 13).text_color(t.accent))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child(`${this.asked}'s suggestion, previewed below`)))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_medium().child(`${this.asker}'s suggestion, previewed below`)))
       .child(div().text_size(11).text_color(t.muted).child(summary))
       .child(div().text_size(10.5).text_color(t.dim).child("Highlighted sessions would move. Click one to leave it where it is. Nothing changes until you apply; Esc dismisses."))
       .child(h_flex().gap(6).mt(1).items_center()
@@ -1118,13 +1158,23 @@ export default class AgentSidebar extends View {
     const space = this.bySpace && !state ? this.newSpaceButton(t, group) : null;
     const kind = this.x.shared(KINDS_KEY)?.[group.name ?? ""];
     const icon = KIND_ICON[kind] ?? (group.remote ? "server" : "computer");
-    const label = `${group.remote ? "Remote" : "Local"} host ${group.label}, ${counts(group.rows).all} sessions${state ? `, ${state}` : ""}, ${open ? "expanded" : "collapsed"}`;
+    const reading = this.statsOf(group);
+    const busy = reading ? statsText(reading) : "";
+    const label = `${group.remote ? "Remote" : "Local"} host ${group.label}, ${counts(group.rows).all} sessions${state ? `, ${state}` : ""}${busy ? `, ${busy}` : ""}, ${open ? "expanded" : "collapsed"}`;
     const root = h_flex().id(`host-${group.key}`).flex_none().items_center()
       .role("button").accessibility_label(label).cursor_pointer()
-      .tooltip(`${group.remote ? "Remote host" : "Local machine"}: ${group.label}${KIND_ICON[kind] ? ` · ${kind}` : ""}${state ? ` · ${state}` : ""}`)
+      .tooltip(`${group.remote ? "Remote host" : "Local machine"}: ${group.label}${KIND_ICON[kind] ? ` · ${kind}` : ""}${state ? ` · ${state}` : ""}${busy ? `\n${busy}` : ""}`)
       .on_click((_e, cx) => this.toggle(group.key, cx));
     if (compact) return root.h(30).px(6).gap(4).justify_center().when(!first, el => el.mt(4).border_t(1).border_color(t.border))
       .child(glyph(icon, 14).text_color(color)).child(add);
+    const summary = open ? [] : this.summary(t, group);
+    // The figures take the room the name leaves, and go when there is too little (the tooltip
+    // keeps them). Roughly: the padding, chevron and icon; the name and its tag; the summary,
+    // count and buttons at the end.
+    const room = this.width - 12 - 50 - Math.ceil(group.label.length * 6.4) - (group.remote ? 50 : 0)
+      - summary.length * 30 - 60 - (space ? 30 : 0) - 8;
+    const shown = reading ? statFigures(reading).slice(0, Math.max(0, Math.floor((room + STAT_GAP) / (STAT_WIDTH + STAT_GAP)))) : [];
+    const tones = [t.muted, t.ansi3 ?? t.working, t.ansi1 ?? t.blocked];
     // Grouped by space, a machine's heading also starts a new space there.
     return root.h(HEIGHT.host + (state ? HEIGHT.hostState : 0)).px(8).gap(8).rounded(6)
       .when(!first, el => el.mt(HEIGHT.hostGap))
@@ -1134,12 +1184,22 @@ export default class AgentSidebar extends View {
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().min_w(0).truncate().font_semibold().text_size(12).text_color(t.foreground).child(group.label))
-          .when(group.remote, el => el.child(div().flex_none().px(4).py(1).rounded(4).bg(t.raised).text_size(8.5).font_semibold().text_color(color).child("REMOTE"))))
+          .when(group.remote, el => el.child(div().flex_none().px(4).py(1).rounded(4).bg(t.raised).text_size(8.5).font_semibold().text_color(color).child("REMOTE")))
+          .when(shown.length > 0, el => el.child(h_flex().id(`stats-${group.key}`).flex_none().ml(2).gap(STAT_GAP).items_center().tooltip(busy)
+            .children(shown.map(f => h_flex().id(`stat-${group.key}-${f.key}`).flex_none().gap(3).items_center()
+              .child(glyph(f.key, 11).text_color(f.level ? tones[f.level] : t.dim))
+              .child(div().min_w(19).text_size(10).text_color(tones[f.level]).child(f.text)))))))
         .when(Boolean(state), el => el.child(div().text_size(10).text_color(group.layout === "loading" ? t.muted : t.blocked).child(state))))
-      .when(!open, el => el.children(this.summary(t, group)))
+      .children(summary)
       .child(div().flex_none().min_w(14).text_size(10.5).text_color(t.muted).text_right().child(String(counts(group.rows).all)))
       .when(Boolean(space), el => el.child(space))
       .child(add);
+  }
+
+  // The machine's last reading, while the figures are on and it is fresh.
+  statsOf(group) {
+    const reading = this.cfg.stats ? this.stats.get(group.name ?? null)?.reading : null;
+    return reading && Date.now() - reading.at <= STATS_STALE_MS ? reading : null;
   }
 
   newSpaceButton(t, group, size = 22) {
@@ -1220,6 +1280,9 @@ export default class AgentSidebar extends View {
     this.expanded = this.x.shared(DENSITY_KEY) === "expanded";
     // Only this computer: no host heading, which would only repeat it. Its + moves to the title bar.
     this.single = !hosts.some(host => host.name != null);
+    // The machines whose heading shows, for askStats: their figures go beside the name, or only
+    // into its tooltip when the name leaves no room.
+    this.headed = this.single || compact ? [] : sections.filter(group => !group.flat && !isAway(group) && group.layout === "ready").map(group => group.name ?? null);
     const local = { layout: "loading", ...hosts.find(host => host.name == null), name: null, key: "local", label: "Local" };
     this.visible = [];
     this.positions = new Map();

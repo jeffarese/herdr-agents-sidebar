@@ -4,7 +4,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROBE, KIND, machineKind, flagsOf, activityOf, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
+import { PROBE, KIND, STATS, machineKind, parseStats, snapshotStats, flagsOf, activityOf, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
 
 // As ps prints a background command Claude Code started (captured from Claude Code 2.1.323).
 const snapshot = command => `/bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1794566139050-qx5w1i.sh 2>/dev/null || true && \\builtin setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval '${command.replaceAll("'", `'"'"'`)}' < /dev/null && pwd -P >| /tmp/claude-151a-cwd`;
@@ -287,4 +287,65 @@ test("what a tool call is about is read from its start, however it was cut", () 
   assert.deepEqual(activityOf(`"type":"tool_use","name":"Bash","input":{"command":"caf\uFFFD`), { tool: "Bash", detail: "caf" });
   assert.equal(activityOf("-"), null);
   assert.equal(activityOf(`"type":"tool_use","id":"toolu_1","na`), null);
+});
+
+test("how busy a machine is reads from one line; anything else is no answer", () => {
+  assert.deepEqual(parseStats("U 23 55902535680 68719476736 33\n", 5), { cpu: 0.23, used: 55902535680, total: 68719476736, pressure: 0.33, at: 5 });
+  // Linux has no pressure; a machine with no memory figure still has its CPU, and the reverse.
+  assert.deepEqual(parseStats("U 7 3000 8000 -", 5), { cpu: 0.07, used: 3000, total: 8000, pressure: null, at: 5 });
+  assert.deepEqual(parseStats("U 40 0 0 -", 5), { cpu: 0.4, used: null, total: null, pressure: null, at: 5 });
+  assert.deepEqual(parseStats("noise\nU - 9000 8000 -\n", 5), { cpu: null, used: 8000, total: 8000, pressure: null, at: 5 });
+  for (const junk of ["U - 0 0 -", "U 23 1 2", "U x 1 2 3", "U 2345 1 2 3", "", undefined]) assert.equal(parseStats(junk), null, junk);
+});
+
+test("this computer's figures come from herdr-stats' snapshot while it is fresh", () => {
+  const snap = (extra = {}) => JSON.stringify({ v: 1, t: 1000, cpu: { total: 0.403 }, mem: { used: 55300292608, total: 68719476736, pressure: 0.32 }, ...extra });
+  assert.deepEqual(snapshotStats(snap(), 3000), { cpu: 0.403, used: 55300292608, total: 68719476736, pressure: 0.32, at: 1000 });
+  assert.equal(snapshotStats(snap(), 7000), null); // its sampler stopped
+  assert.equal(snapshotStats(snap({ v: 2 }), 3000), null);
+  assert.deepEqual(snapshotStats(snap({ mem: null }), 3000), { cpu: 0.403, used: null, total: null, pressure: null, at: 1000 });
+  for (const junk of [null, "", "{", "[]", snap({ t: "now" }), snap({ cpu: null, mem: null })]) assert.equal(snapshotStats(junk, 3000), null, junk);
+});
+
+// Stand-ins for the commands STATS runs, as a Mac and a Linux machine print them.
+function standIns(t, system, commands) {
+  const bin = mkdtempSync(join(tmpdir(), "agent-sidebar-stats-"));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  for (const [name, body] of Object.entries({ uname: `echo ${system}`, ...commands })) {
+    writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(bin, name), 0o755);
+  }
+  return execFileSync("/bin/sh", ["-c", STATS], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+}
+
+test("a Mac is measured as herdr-stats measures it", { skip: !existsSync("/bin/sh") }, t => {
+  const out = standIns(t, "Darwin", {
+    iostat: "printf '            cpu    load average\\n    us sy id   1m   5m   15m\\n     7  5 88  3.85 4.91 4.46\\n    16  5 79  3.94 4.91 4.46\\n'",
+    sysctl: "printf '68719476736\\n72\\n'",
+    vm_stat: `cat <<'EOF'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    29689.
+Pages wired down:                             489356.
+Pages purgeable:                               54720.
+Anonymous pages:                             2266227.
+Pages occupied by compressor:                 629724.
+EOF`,
+  });
+  // CPU from the second report; memory is app (anonymous less purgeable), wired and compressed.
+  assert.equal(out, `U 21 ${(2266227 - 54720 + 489356 + 629724) * 16384} 68719476736 28\n`);
+});
+
+test("a Linux machine is measured from /proc, a second apart", { skip: !existsSync("/bin/sh") }, t => {
+  const out = standIns(t, "Linux", {
+    // The first read, then the second: 100 more busy jiffies and 300 more idle or waiting.
+    head: `if [ -f "$0.again" ]; then echo 'cpu  1060 10 240 9250 50 0 0 0 0 0'; else : > "$0.again"; echo 'cpu  1000 10 200 9000 0 0 0 0 0 0'; fi`,
+    sleep: ":",
+    cat: "printf 'MemTotal:       16000000 kB\\nMemFree:         2000000 kB\\nMemAvailable:    6000000 kB\\n'",
+  });
+  assert.equal(out, `U 25 ${10000000 * 1024} ${16000000 * 1024} -\n`);
+});
+
+test("this machine says how busy it is", { skip: !["darwin", "linux"].includes(process.platform) }, () => {
+  const reading = parseStats(execFileSync("/bin/sh", ["-c", STATS], { encoding: "utf8" }));
+  assert.ok(reading && reading.cpu !== null && reading.total > 0 && reading.used > 0, JSON.stringify(reading));
 });

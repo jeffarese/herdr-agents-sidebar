@@ -544,13 +544,36 @@ export function previewOf(rows, spaces, plan, skip = new Set()) {
 // answer it. Never to a shell, where it would run.
 export const canReply = row => Boolean(row?.available && row.kind === "agent" && !row.inner && row.reported !== "blocked");
 
+// How busy a machine is (background.js parseStats), beside its name: CPU and memory in use,
+// quiet until one runs high, then a warning (1) and worse (2) at herdr-stats' thresholds.
+// Memory goes by its pressure where the machine says it (a Mac keeps most of its memory in use,
+// and only the pressure says it is short), else by how much of it is used.
+export const STAT_LEVELS = { cpu: [0.7, 0.9], used: [0.8, 0.92], pressure: [0.5, 0.75] };
+const statLevel = (value, [warn, crit]) => value == null ? 0 : value >= crit ? 2 : value >= warn ? 1 : 0;
+const percent = x => `${Math.round(x * 100)}%`;
+const gigabytes = n => (n / 2 ** 30).toFixed(n < 100 * 2 ** 30 ? 1 : 0).replace(/\.0$/, "");
+// [{ key: "cpu" | "memory", text: "23%", level: 0 | 1 | 2 }], in that order.
+export function statFigures(r) {
+  const out = [];
+  if (r?.cpu != null) out.push({ key: "cpu", text: percent(r.cpu), level: statLevel(r.cpu, STAT_LEVELS.cpu) });
+  if (r?.total) {
+    const used = r.used / r.total;
+    out.push({ key: "memory", text: percent(used), level: r.pressure != null ? statLevel(r.pressure, STAT_LEVELS.pressure) : statLevel(used, STAT_LEVELS.used) });
+  }
+  return out;
+}
+// "CPU 45% · Memory 52.1 of 64 GB (81%), pressure 33%"
+export const statsText = r => [r?.cpu != null ? `CPU ${percent(r.cpu)}` : "",
+  r?.total ? `Memory ${gigabytes(r.used)} of ${gigabytes(r.total)} GB (${percent(r.used / r.total)})${r.pressure != null ? `, pressure ${percent(r.pressure)}` : ""}` : ""]
+  .filter(Boolean).join(" · ");
+
 // The sidebar's settings, in Herdr's shared state: the person's, so every copy and layout
 // follows. Density and grouping have keys of their own (a key can be bound to each).
 export const DENSITY_KEY = "agent-sidebar.density";
 export const GROUP_KEY = "agent-sidebar.group";
 export const SETTINGS_KEY = "agent-sidebar.settings";
 export const DEFAULTS = {
-  folders: true, subagents: true, shells: true, away: true,
+  folders: true, subagents: true, shells: true, away: true, stats: true,
   model: true, effort: true, effortColors: true, activity: true, context: true, changes: true, pulls: true, age: true,
   addMachine: true, closed: true, cleanup: true, cleanupDays: 1,
   organize: true, organizeWith: "claude", organizeModel: "sonnet", organizeCodex: "terra", organizeEffort: "low",
