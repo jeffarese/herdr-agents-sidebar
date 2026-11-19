@@ -586,7 +586,7 @@ export const GROUP_KEY = "agent-sidebar.group";
 export const SETTINGS_KEY = "agent-sidebar.settings";
 export const DEFAULTS = {
   folders: true, subagents: true, shells: true, away: true, stats: true,
-  model: true, effort: true, effortColors: true, activity: true, context: true, changes: true, pulls: true, age: true,
+  model: true, effort: true, effortColors: false, activity: true, context: true, changes: true, pulls: true, age: true,
   addMachine: true, closed: true, cleanup: true, cleanupDays: 1,
   organize: true, organizeWith: "claude", organizeModel: "sonnet", organizeCodex: "terra", organizeEffort: "low",
   animations: true,

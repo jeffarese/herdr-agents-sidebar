@@ -60,7 +60,7 @@ function setup(initial = {}, saved = {}) {
     View: class {}, div: el, svg: path => el().src(path), image: el, h_flex: el, v_flex: el,
     InputState: { new: () => input }, Input: { new: el }, ScrollHandle: { new: () => ({ scroll_to_item(i) { scrollTo = i; } }) },
     ...Object.fromEntries(Object.keys(state).map(k => [k, () => state[k]])),
-    focused: () => state.focused, theme: () => new Proxy({}, { get: () => "#aabbcc" }), settings: () => ({ zoom: 1 }),
+    focused: () => state.focused, theme: () => new Proxy({}, { get: (_, key) => typeof key === "string" ? `#${key}` : undefined }), // each color names its key settings: () => ({ zoom: 1 }),
     run: (name, args) => commands.push({ name, args }), setAgentOrder: addresses => { order = addresses; }, nextCommand: () => new Promise(() => {}),
     openOverlay: spec => overlays.push(spec), closeOverlay() {}, props: () => ({ ...initial, overlay: "popup" }), knownAgents: async () => agentList,
     home: () => "/Users/me", pickFolder: async () => picked, window: () => ({ platform: "macos" }),
@@ -931,11 +931,12 @@ test("rows that change place slide from the old one, and those they pass make ro
   root = h.view.render();
   const second = findStart(root, "slide-row:t2-");
   const first = findStart(root, "slide-row:t1-");
-  // Drawn where it was (section 22 + row 28 + section 22 below its new place), moving up...
-  assert.equal(second.props.top, 22 + 28 + 22 - 22);
+  // Drawn where it was (section 22 + row 28 + the space and section 22 below its new place),
+  // moving up...
+  assert.equal(second.props.top, 22 + 28 + 6 + 22 - 22);
   assert.ok(find(second, "agent-t2"));
   // ...and the one it passed drawn where it was too, moving down.
-  assert.equal(first.props.top, 22 - (22 + 28 + 22));
+  assert.equal(first.props.top, 22 - (22 + 28 + 6 + 22));
   assert.equal(second.props.transition[0], "top");
   assert.equal(findStart(root, "slide-section:local:blocked-").props.opacity, 0);
   root = h.view.render();
@@ -1297,6 +1298,90 @@ test("a working session says what it is doing, one that needs you what it wants;
   assert.match(text(find(h.view.render(), "agent-t1")), /Fix login Bash · Run the tests Opus · xhigh/);
 });
 
+test("expanded, the model gives way first on a crowded second line, and the tooltip keeps it; effort is gray unless asked", () => {
+  const h = setup();
+  h.state.machines = [{ name: null, layout: "ready" }];
+  h.state.terminals = [
+    { address: "t1", state: "live", status: "blocked", title: "Rotate keys", program: { name: "Claude", agent: true } },
+    { address: "t2", state: "live", status: "idle", title: "Fix the test", program: { name: "Claude", agent: true } },
+    { address: "t3", state: "live", status: "working", title: "Upgrade", program: { name: "Claude", agent: true } },
+  ];
+  h.state.panes = ["t1", "t2", "t3"].map((terminal, i) => ({ pane: `p${i}`, terminal, tab: "tb", cwd: "/Users/me/code/web", branch: "fix-checkout" }));
+  const step = (tool, detail) => ({ tool, detail });
+  h.view.work = new Map([
+    ["t1", { ...reading("claude-opus-5-5", "xhigh"), activity: step("AskUserQuestion", "Rotate the staging keys too?") }],
+    ["t2", reading("claude-sonnet-5-5", "medium")],
+    ["t3", { ...reading("claude-opus-5-5", "xhigh"), activity: step("Bash", "Run the tests") }],
+  ]);
+  h.view.git.set(null, { changes: new Map([["/Users/me/code/web", { files: 2, added: 42, removed: 7 }]]), pulls: new Map([["/Users/me/code/web", { number: 128, state: "open", url: "" }]]), asked: Date.now(), pulled: Date.now() });
+  h.view.width = 340;
+  h.sharedState["agent-sidebar.density"] = "expanded";
+  let root = h.view.render();
+  // The question is said in full; the model is left to the tooltip.
+  assert.equal(find(root, "uses-t1"), null);
+  assert.match(text(find(root, "agent-t1")), /Asks · Rotate the staging keys too\?/);
+  assert.match(find(root, "agent-t1").props.tooltip, /\nOpus 5\.5 · xhigh effort/);
+  // The folder, its branch and what changed there come before the model too.
+  assert.equal(find(root, "uses-t2"), null);
+  assert.match(text(find(root, "agent-t2")), /~\/code\/web · fix-checkout \+42 −7 #128/);
+  // One step that leaves room keeps it, in full.
+  assert.equal(text(find(root, "uses-t3")), "Opus 5.5 · xhigh");
+  // The effort is gray, bolder from xhigh up, and colored by level only when asked.
+  assert.equal(find(root, "effort-t3").props.text_color, "#muted");
+  assert.ok("font_medium" in find(root, "effort-t3").props);
+  h.sharedState["agent-sidebar.settings"] = { effortColors: true };
+  assert.equal(find(h.view.render(), "effort-t3").props.text_color, "#ansi3");
+  // With room enough, it comes back.
+  h.sharedState["agent-sidebar.settings"] = {};
+  h.view.width = 520;
+  root = h.view.render();
+  assert.equal(text(find(root, "uses-t1")), "Opus 5.5 · xhigh");
+  assert.equal(text(find(root, "uses-t2")), "Sonnet 5.5 · medium");
+  // An idle row's changes and icon are as quiet as its title.
+  assert.equal(find(root, "git-t2").props.opacity, 0.6);
+  assert.equal(find(root, "git-t3"), null); // working: what it does takes the folder's place
+});
+
+test("the machine heads the list, a line apart; a section is a quiet label with a dot of its status's color", () => {
+  const h = setup();
+  h.state.terminals.push({ address: "t2", state: "live", status: "working", title: "Busy", program: { name: "Claude", agent: true } });
+  let root = h.view.render();
+  // The machine's name is larger than the sessions' titles, and the second machine has a line above.
+  const label = (node, words) => !node || typeof node !== "object" ? null
+    : node.nodes.includes(words) ? node : node.nodes.map(child => label(child, words)).find(Boolean) ?? null;
+  assert.equal(label(find(root, "host-local"), "Local").props.text_size, 13.5);
+  assert.equal(label(find(root, "agent-t2"), "Busy").props.text_size, 12.5);
+  assert.equal(find(root, "host-local").nodes.some(node => node.props?.bg === "#border"), false);
+  assert.equal(find(root, "host-remote:work").props.mt, 14);
+  assert.ok(find(root, "host-remote:work").nodes.some(node => node.props?.bg === "#border" && node.props.absolute !== undefined));
+  // The label is muted; the color is in its dot. Pinned and Idle have a ring.
+  const working = find(root, "section-local:working");
+  assert.equal(label(working, "Working").props.text_color, "#muted");
+  assert.equal(find(working, "status-local:working").props.bg, "#working");
+  assert.equal(find(root, "status-remote:work:blocked").props.bg, "#blocked");
+  assert.equal(find(root, "status-local:idle").props.bg, undefined);
+  assert.equal(find(root, "status-local:idle").props.border_color, "#dim");
+  // Space above every section but the first of its machine.
+  assert.equal(working.props.mt, undefined);
+  assert.equal(find(root, "section-local:idle").props.mt, 6);
+  // Its chevron only while pointed at, or folded.
+  const chevron = node => glyphs(node).map(g => g.props.src).find(src => /chevron/.test(src)) ?? null;
+  assert.equal(chevron(find(root, "section-local:idle")), null);
+  find(root, "section-local:idle").props.on_hover(true, h.cx);
+  assert.match(chevron(find(h.view.render(), "section-local:idle")), /chevron-down/);
+  find(h.view.render(), "section-local:idle").props.on_hover(false, h.cx);
+  find(h.view.render(), "section-local:idle").props.on_click(null, h.cx);
+  assert.match(chevron(find(h.view.render(), "section-local:idle")), /chevron-right/);
+  // Grouped by space, a space has its own color dot and No space none; Needs you, which leads
+  // whatever the grouping, keeps its own.
+  h.state.spaces = [{ id: "s1", name: "api", machine: null }];
+  h.state.panes = [{ pane: "p1", terminal: "t2", tab: "tb", space: "s1" }];
+  h.view.toggleGroup();
+  root = h.view.render();
+  assert.ok(ids(root).some(id => id.startsWith("section-local:space:")));
+  assert.deepEqual(ids(root).filter(id => id.startsWith("status-")), ["status-remote:work:blocked"]);
+});
+
 test("a message typed under a row is sent to that agent; never to a shell, or to one waiting on a dialog", async () => {
   const h = setup();
   h.state.terminals.push({ address: "t9", state: "live", program: { name: "zsh", shell: true }, cwd: "/Users/me" });
@@ -1582,8 +1667,9 @@ test("the gear's window is the sidebar's settings, in tabs: every choice is shar
   find(root, "set-group-project").props.on_click(null, h.cx);
   assert.deepEqual([h.sharedState["agent-sidebar.density"], h.sharedState["agent-sidebar.group"]], ["expanded", "project"]);
   assert.equal(at("set-group-project").props.aria_selected, true);
-  // Every switch is there, on by default; a click turns it off, another back on.
+  // Every switch is there, on by default but the effort's colors; a click turns it over.
   const keys = Object.keys(model.DEFAULTS).filter(key => typeof model.DEFAULTS[key] === "boolean");
+  assert.deepEqual(keys.filter(key => !model.DEFAULTS[key]), ["effortColors"]);
   assert.equal(keys.length, 18);
   // Organize asks Claude Code or Codex, each with the families it has.
   assert.ok(at("set-organizeModel-sonnet") && !at("set-organizeCodex-terra"));
@@ -1593,10 +1679,11 @@ test("the gear's window is the sidebar's settings, in tabs: every choice is shar
   assert.deepEqual([h.sharedState["agent-sidebar.settings"].organizeWith, h.sharedState["agent-sidebar.settings"].organizeCodex], ["codex", "sol"]);
   at("set-organizeWith-claude").props.on_click(null, h.cx);
   for (const key of keys) {
-    assert.equal(at(`set-${key}`).props.aria_selected, true, key);
+    const on = model.DEFAULTS[key];
+    assert.equal(at(`set-${key}`).props.aria_selected, on, key);
     at(`set-${key}`).props.on_click(null, h.cx);
-    assert.equal(h.sharedState["agent-sidebar.settings"][key], false, key);
-    assert.equal(at(`set-${key}`).props.aria_selected, false, key);
+    assert.equal(h.sharedState["agent-sidebar.settings"][key], !on, key);
+    assert.equal(at(`set-${key}`).props.aria_selected, !on, key);
   }
   at("set-model").props.on_click(null, h.cx);
   assert.equal(h.sharedState["agent-sidebar.settings"].model, true);

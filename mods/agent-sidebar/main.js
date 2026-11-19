@@ -82,7 +82,7 @@ const SLIDE = { duration: 300, easing: "ease-out" };
 // Something new in a list that was already shown fades in where it lands.
 const ENTER = { duration: 240, easing: "ease-out" };
 const SLIDE_MS = 700;
-const HEIGHT = { host: 30, hostState: 10, hostGap: 6, away: 24, section: 22, folder: 20, empty: 29 };
+const HEIGHT = { host: 30, hostState: 10, hostGap: 14, away: 24, section: 22, sectionGap: 6, folder: 20, empty: 29 };
 // A host heading and the space above it.
 const hostHeight = (group, first, firstAway) => isAway(group) ? HEIGHT.away + (firstAway && !first ? HEIGHT.hostGap : 0)
   : HEIGHT.host + (hostState(group) ? HEIGHT.hostState : 0) + (first ? 0 : HEIGHT.hostGap);
@@ -179,7 +179,7 @@ export default class AgentSidebar extends View {
         else if (command === "group") this.toggleGroup();
         else if (command === "settings") this.openSettings();
         // The README's picture: a copy with example sessions, to take a shot of.
-        else if (command === "demo") openOverlay({ mod: "agent-sidebar", kind: "dialog", width: 340, height: 846, props: { demo: true } });
+        else if (command === "demo") openOverlay({ mod: "agent-sidebar", kind: "dialog", width: 340, height: 892, props: { demo: true } });
         // Asks Claude; again, puts its suggestion (or the asking) away.
         else if (command === "organize") this.plan ? this.dismissPlan() : this.organize();
         cx.notify();
@@ -824,16 +824,22 @@ export default class AgentSidebar extends View {
 
   // "+120 −8 #42" after an expanded row's folder: lines changed since the last commit, and the
   // branch's pull request in its state's color.
-  gitTag(t, row) {
+  gitTag(t, row, parts = this.gitParts(row)) {
+    if (!parts.length) return null;
+    return h_flex().id(`git-${row.address}`).flex_none().gap(4).items_center().text_size(10.5)
+      .children(parts.map(part => div().text_color(t[part.color] ?? t.dim).child(part.text)));
+  }
+
+  // Its words and their color keys, so a row can tell how much room they take.
+  gitParts(row) {
     const found = this.gitOf(row);
     const changes = this.cfg.changes ? found.changes : null;
     const pull = this.cfg.pulls ? found.pull : null;
-    const dirty = changes && (changes.added || changes.removed);
-    if (!dirty && !pull) return null;
-    return h_flex().id(`git-${row.address}`).flex_none().gap(4).items_center().text_size(10.5)
-      .when(Boolean(dirty) && changes.added > 0, el => el.child(div().text_color(t.ansi2).child(`+${changes.added}`)))
-      .when(Boolean(dirty) && changes.removed > 0, el => el.child(div().text_color(t.ansi1).child(`−${changes.removed}`)))
-      .when(Boolean(pull), el => el.child(div().text_color(t[PULL_COLOR[pull.state]] ?? t.dim).child(`#${pull.number}`)));
+    return [
+      changes?.added > 0 ? { text: `+${changes.added}`, color: "ansi2" } : null,
+      changes?.removed > 0 ? { text: `−${changes.removed}`, color: "ansi1" } : null,
+      pull ? { text: `#${pull.number}`, color: PULL_COLOR[pull.state] ?? "dim" } : null,
+    ].filter(Boolean);
   }
 
   // "Opus 5.5 · xhigh effort · 159k context": what the session's last turn ran with, and how
@@ -845,14 +851,16 @@ export default class AgentSidebar extends View {
   }
 
   // The same, at a glance, in words: `label` is the model's name and `context` its tokens, or
-  // none where there is no room. The effort has its level's color: it is what differs most.
+  // none where there is no room. The effort is what differs most: a little brighter than the
+  // rest, and bolder from xhigh up. Colored by level only when the settings say so, since the
+  // list's colors otherwise all mean a status.
   uses(t, row, label, context = "", effort = row.effort ?? "") {
     if (!label && !effort) return null;
     return h_flex().id(`uses-${row.address}`).flex_none().gap(3).items_center().text_size(10.5).text_color(t.dim).tooltip(this.usesText(row))
       .when(Boolean(label), el => el.child(div().child(label)))
       .when(Boolean(label && effort), el => el.child(div().child("·")))
       .when(Boolean(effort), el => el.child(div().id(`effort-${row.address}`).text_color(this.cfg.effortColors ? t[EFFORT_COLOR[effort]] ?? t.muted : t.muted)
-        .when(this.cfg.effortColors && effort === "xhigh", el => el.font_medium()).when(this.cfg.effortColors && effort === "max", el => el.font_semibold()).child(effort)))
+        .when(effort === "xhigh", el => el.font_medium()).when(effort === "max", el => el.font_semibold()).child(effort)))
       .when(Boolean(context), el => el.child(div().child("·")).child(div().child(context)));
   }
 
@@ -891,7 +899,9 @@ export default class AgentSidebar extends View {
     const doing = cfg.activity ? activityText(row) : "";
     const used = cfg.context ? tokens(row.context) : "";
     // Lines changed and the pull request: beside the folder, so not while it gives way to `doing`.
-    const git = expanded && !doing ? this.gitTag(t, row) : null;
+    // On an idle row they are as quiet as its title.
+    const changed = expanded && !doing ? this.gitParts(row) : [];
+    const git = changed.length ? this.gitTag(t, row, changed).when(quiet, el => el.opacity(0.6)) : null;
     // By project, sessions of several machines share a list: one elsewhere says where.
     const elsewhere = this.byProject && row.machine != null && !row.inner ? row.machine : "";
     let context = "";
@@ -901,10 +911,16 @@ export default class AgentSidebar extends View {
     let room = Math.floor(px / 6.5);
     if (expanded && name) {
       const line = Math.floor(px / 5.6);
+      // The model gives way first: to what it is doing or asks, said in full, or to the end of
+      // its folder, its branch and what it changed. The tooltip keeps it.
       const first = doing || where;
-      model = first.length + said(name.label).length + 2 <= line ? name.label : name.family;
-      context = used && first.length + said(model).length + used.length + 5 <= line ? used : "";
-      if (!row.inner && !doing) where = fitWhere(shortPath(row.cwd), row.branch, line - said(model).length - 2 - (git ? 12 : 0));
+      const least = doing || (row.inner ? where : fitWhere(shortPath(row.cwd), row.branch, 0));
+      const tag = changed.length ? changed.map(part => part.text).join(" ").length + 1 : 0;
+      model = first.length + tag + said(name.label).length + 2 <= line ? name.label
+        : least.length + tag + said(name.family).length + 2 <= line ? name.family : null;
+      shown = model !== null;
+      context = shown && used && first.length + tag + said(model).length + used.length + 5 <= line ? used : "";
+      if (!row.inner && !doing) where = fitWhere(shortPath(row.cwd), row.branch, line - tag - (shown ? said(model).length + 2 : 0));
     } else if (name) {
       const fits = [said(name.family), effort].filter(Boolean).find(text => row.title.length + text.length + 2 <= room);
       shown = Boolean(fits);
@@ -1036,7 +1052,8 @@ export default class AgentSidebar extends View {
       .when(this.moving?.addresses.includes(row.address) || this.pending.some(move => move.address === row.address), el => el.opacity(0.5))
       .when(Boolean(tint), el => el.child(tint))
       .when(Boolean(row.parent), el => el.child(glyph("sub", 11).ml(-2).mr(-4).text_color(t.dim)))
-      .child(this.program(t, row, expanded ? 18 : 16))
+      // Idle, its icon steps back with its title: the bright ones are the sessions that matter now.
+      .child(this.program(t, row, expanded ? 18 : 16).when(quiet || !row.available, el => el.opacity(0.5)))
       .child(text)
       .when(row.pinned && section !== "pinned" && !pinning, el => el.child(glyph("pin", 11).text_color(t.dim)))
       .when(goal, el => el.child(div().id(`goal-${row.address}`).flex_none().tooltip(`Goal: ${row.goal.condition}`)
@@ -1067,10 +1084,16 @@ export default class AgentSidebar extends View {
         .when(row.background.length > 0, el => el.loop("opacity", { from: 0.4, to: 1, period: 1600 })));
   }
 
-  section(t, group, section) {
+  // A section's heading is a quiet label: a dot carries the status's color, so the colors in
+  // the list are the sessions' own marks. Its chevron shows while it is folded or pointed at.
+  // `first`: the first under its machine, with no space above it.
+  section(t, group, section, first = true) {
     const key = `${group.key}:${section.id}`;
     const open = this.isOpen(key);
-    const color = section.status ? t[section.status] : t.muted;
+    // A status's section (Needs you leads whatever the grouping): a dot, filled in the status's
+    // color, or a ring for Pinned and Idle, which have none. Not a space's or a project's.
+    const byStatus = !/^(space|project):/.test(section.id);
+    const pointed = this.hoveredSection === key;
     // Sessions: a session's own sub-agents are part of it.
     const n = section.entries.filter(entry => !entry.row.inner).length;
     // One of Herdr's spaces (not "No space"): it has Herdr's color, and things to do with it.
@@ -1087,6 +1110,7 @@ export default class AgentSidebar extends View {
       .child(glyph(icon, 12));
     const rows = section.entries.map(entry => entry.row);
     return h_flex().id(`section-${key}`).h(HEIGHT.section).flex_none().pl(10).pr(8).gap(6).items_center()
+      .when(!first, el => el.mt(HEIGHT.sectionGap))
       .role("button").accessibility_label(target ? `Move ${this.moving.title} to ${section.label}`
         : `${section.label}, ${n} ${n === 1 ? "session" : "sessions"}, ${open ? "expanded" : "collapsed"}`)
       .cursor_pointer().rounded(5).text_size(10.5).font_medium()
@@ -1112,7 +1136,10 @@ export default class AgentSidebar extends View {
       .on_mouse_up("left", (_e, cx) => this.release(cx, group, section))
       .when(Boolean(dot), el => el.child(div().id(`color-${key}`).size(8).flex_none().rounded(4).bg(dot).cursor_pointer().tooltip("Change color")
         .on_click((_e, cx) => { cx.stop_propagation(); if (!this.preview) this.recolor(space); cx.notify(); })))
-      .child(div().min_w(0).truncate().text_color(target ? t.foreground : color).child(section.label))
+      .when(byStatus, el => el.child(div().id(`status-${key}`).size(6).flex_none().rounded(3)
+        .when(Boolean(section.status), el => el.bg(t[section.status]))
+        .when(!section.status, el => el.border(1).border_color(t.dim))))
+      .child(div().min_w(0).truncate().text_color(target ? t.foreground : t.muted).child(section.label))
       .child(div().flex_none().text_color(t.dim).child(String(n)))
       .when(Boolean(fresh), el => el.child(div().id(`fresh-${key}`).flex_none().max_w(120).truncate().px(4).rounded(4).bg(t.accent + "22").text_size(9.5).text_color(t.accent).child(fresh)))
       .child(div().flex_1())
@@ -1123,7 +1150,7 @@ export default class AgentSidebar extends View {
         .when(n > 0 && this.x.spaces().some(other => (other.machine ?? null) === (group.name ?? null) && other.id !== space),
           el => el.child(act("space-merge", "merge", "Move all its sessions to another space", () => this.startMove(rows, `all of ${section.label}`, space))))
         .child(act("space-more", "more", "Rename, worktrees, close", () => this.spaceMenu(space))))
-      .when(!hovered, el => el.child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim)));
+      .when(!hovered && (!open || pointed), el => el.child(glyph(open ? "chevron-down" : "chevron-right", 10).text_color(t.dim)));
   }
 
   // What a folded host holds, by urgency: "! 2  ◌ 3  ✓ 1".
@@ -1174,19 +1201,20 @@ export default class AgentSidebar extends View {
     // The figures take the room the name leaves, and go when there is too little (the tooltip
     // keeps them). Roughly: the padding, chevron and icon; the name and its tag; the summary,
     // count and buttons at the end.
-    const room = this.width - 12 - 50 - Math.ceil(group.label.length * 6.1) - (group.remote ? 18 : 0)
+    const room = this.width - 12 - 50 - Math.ceil(group.label.length * 7) - (group.remote ? 18 : 0)
       - summary.length * 30 - 60 - (space ? 30 : 0) - 8;
     const shown = reading ? statFigures(reading).slice(0, Math.max(0, Math.floor((room + STAT_GAP) / (STAT_WIDTH + STAT_GAP)))) : [];
     const tones = [t.muted, t.ansi3 ?? t.working, t.ansi1 ?? t.blocked];
-    // Grouped by space, a machine's heading also starts a new space there.
+    // Grouped by space, a machine's heading also starts a new space there. The machine is the
+    // list's top level: larger than the sessions under it, and a line apart from the one above.
     return root.h(HEIGHT.host + (state ? HEIGHT.hostState : 0)).px(8).gap(8).rounded(6)
-      .when(!first, el => el.mt(HEIGHT.hostGap))
+      .when(!first, el => el.mt(HEIGHT.hostGap).relative().child(this.divider(t)))
       .hover(s => s.bg(t.hover))
       .child(glyph(open ? "chevron-down" : "chevron-right", 11).text_color(t.dim))
       .child(glyph(icon, 15).text_color(color))
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().min_w(0).gap(6).items_center()
-          .child(div().min_w(0).truncate().font_semibold().text_size(12).text_color(t.foreground).child(group.label))
+          .child(div().min_w(0).truncate().font_semibold().text_size(13.5).text_color(t.foreground).child(group.label))
           .when(group.remote, el => el.child(remoteMark(color, group.key)))
           .when(shown.length > 0, el => el.child(h_flex().id(`stats-${group.key}`).flex_none().ml(2).gap(STAT_GAP).items_center().tooltip(busy)
             .children(shown.map(f => h_flex().id(`stat-${group.key}-${f.key}`).flex_none().gap(3).items_center()
@@ -1197,6 +1225,11 @@ export default class AgentSidebar extends View {
       .child(div().flex_none().min_w(14).text_size(10.5).text_color(t.muted).text_right().child(String(counts(group.rows).all)))
       .when(Boolean(space), el => el.child(space))
       .child(add);
+  }
+
+  // A hairline in the middle of the space above a machine's heading.
+  divider(t) {
+    return div().absolute().top(-HEIGHT.hostGap / 2 - 1).left(8).right(8).h(1).bg(t.border);
   }
 
   // The machine's last reading, while the figures are on and it is fresh.
@@ -1227,7 +1260,7 @@ export default class AgentSidebar extends View {
         cx.notify();
       });
     if (compact) return root.h(22).justify_center().when(gap, el => el.mt(4)).child(glyph("offline", 12));
-    return root.h(HEIGHT.away).px(8).gap(8).when(gap, el => el.mt(HEIGHT.hostGap))
+    return root.h(HEIGHT.away).px(8).gap(8).when(gap, el => el.mt(HEIGHT.hostGap).relative().child(this.divider(t)))
       .child(glyph(open ? "chevron-down" : "chevron-right", 11))
       .child(glyph("offline", 13))
       .child(div().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(group.label))
@@ -1326,8 +1359,8 @@ export default class AgentSidebar extends View {
         for (const row of group.rows) if (!row.inner) add(row, this.railRow(t, row));
         return;
       }
-      for (const section of group.sections) {
-        push(this.section(t, group, section), `section:${group.key}:${section.id}`, HEIGHT.section);
+      for (const [j, section] of group.sections.entries()) {
+        push(this.section(t, group, section, j === 0), `section:${group.key}:${section.id}`, HEIGHT.section + (j ? HEIGHT.sectionGap : 0));
         // A folded section still shows the session you are in: clicking a session that is done
         // makes it idle, and it must not vanish into a folded Idle.
         const open = this.isOpen(`${group.key}:${section.id}`);
