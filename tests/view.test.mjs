@@ -1768,7 +1768,7 @@ test("each machine's heading says how busy it is, from herdr-stats here while it
   assert.equal(find(root, "stats-local"), null); // nothing read yet
   assert.deepEqual(h.view.headed, [null, "work"]); // not the one that is away
   h.file(JSON.stringify({ v: 1, t: Date.now(), cpu: { total: 0.18 }, mem: { used: 21.4 * GB, total: 32 * GB, pressure: 0.12 } }));
-  h.answer(async (_cmd, args) => ({ code: 0, stderr: "", stdout: args[1] === background.STATS ? `U 86 ${28 * GB} ${32 * GB} 52\n` : "" }));
+  h.answer(async (_cmd, args) => ({ code: 0, stderr: "", stdout: args[1] === background.STATS ? `U 86 ${28 * GB} ${32 * GB} 52 ${421 * GB} ${494 * GB}\n` : "" }));
   let answers = 0;
   h.view.askStats(() => answers++);
   await settle();
@@ -1778,10 +1778,15 @@ test("each machine's heading says how busy it is, from herdr-stats here while it
   assert.equal(answers, 2);
   root = h.view.render();
   assert.equal(figures(root, "local"), "18% 67%");
-  assert.equal(figures(root, "remote:work"), "86% 88%");
-  assert.deepEqual(glyphs(find(root, "stats-remote:work")).map(g => g.props.src.split("/").pop()), ["cpu.svg", "memory.svg"]);
-  assert.match(find(root, "host-remote:work").props.tooltip, /\nCPU 86% · Memory 28 of 32 GB \(88%\), pressure 52%$/);
-  assert.equal(find(root, "stats-remote:work").props.tooltip, "CPU 86% · Memory 28 of 32 GB (88%), pressure 52%");
+  assert.equal(figures(root, "remote:work"), "86% 88% 85%");
+  assert.deepEqual(glyphs(find(root, "stats-remote:work")).map(g => g.props.src.split("/").pop()), ["cpu.svg", "memory.svg", "disk.svg"]);
+  const busy = "CPU 86% · Memory 28 of 32 GB (88%), pressure 52% · Disk 421 of 494 GB (85%)";
+  assert.ok(find(root, "host-remote:work").props.tooltip.endsWith(`\n${busy}`));
+  assert.equal(find(root, "stats-remote:work").props.tooltip, busy);
+  // A remote machine is marked by a globe after its name, not a tag.
+  assert.deepEqual(glyphs(find(root, "remote-remote:work")).map(g => g.props.src.split("/").pop()), ["globe.svg"]);
+  assert.doesNotMatch(text(find(root, "host-remote:work")), /REMOTE/);
+  assert.equal(find(root, "remote-local"), null);
   assert.match(find(root, "host-local").props.accessibility_label, /, CPU 18% · Memory 21\.4 of 32 GB \(67%\), pressure 12%, expanded$/);
   // Not asked again before it is due.
   h.view.askStats(() => answers++);
@@ -1794,7 +1799,7 @@ test("each machine's heading says how busy it is, from herdr-stats here while it
   await settle();
   assert.deepEqual(h.execs.slice(1).map(([, , opts]) => opts.on).sort(), [null, "work"]);
   assert.equal(answers, 3);
-  assert.equal(figures(h.view.render(), "local"), "86% 88%");
+  assert.equal(figures(h.view.render(), "local"), "86% 88% 85%");
   // A machine that answers slowly is not asked twice meanwhile.
   h.answer(() => new Promise(() => {}));
   for (const state of h.view.stats.values()) state.asked = 0;
@@ -1808,14 +1813,11 @@ test("each machine's heading says how busy it is, from herdr-stats here while it
   root = h.view.render();
   assert.equal(find(root, "stats-remote:work"), null);
   assert.doesNotMatch(find(root, "host-remote:work").props.tooltip, /CPU/);
-  // Narrower, memory goes first, then CPU; the tooltip keeps both.
+  // Narrower, the disk goes first, then memory; the tooltip keeps them all.
   h.view.stats.get("work").reading.at = Date.now();
-  h.view.width = 250;
-  assert.deepEqual(ids(find(h.view.render(), "stats-remote:work")).filter(id => id.startsWith("stat-")), ["stat-remote:work-cpu"]);
-  h.view.width = 215;
-  root = h.view.render();
-  assert.equal(find(root, "stats-remote:work"), null);
-  assert.match(find(root, "host-remote:work").props.tooltip, /CPU 86%/);
+  const kept = width => { h.view.width = width; return ids(find(h.view.render(), "stats-remote:work")).filter(id => id.startsWith("stat-")).map(id => id.split("-").pop()); };
+  assert.deepEqual([kept(300), kept(260), kept(230)], [["cpu", "memory", "disk"], ["cpu", "memory"], ["cpu"]]);
+  assert.ok(find(h.view.render(), "host-remote:work").props.tooltip.endsWith(busy));
   // No figures, nothing asked: in a rail, by project (no machine headings), with one machine,
   // or turned off.
   h.view.width = 100;

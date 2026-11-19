@@ -27,7 +27,7 @@ const SWITCHES = {
     ["subagents", "Sub-agents", "Claude Code's own sub-agents, under their session. Hidden, they still keep it in Working."],
     ["shells", "Shells and programs", "Terminals that run no agent."],
     ["away", "Machines that are away", "One dim line for each machine Herdr can't reach, after the others."],
-    ["stats", "CPU and memory", "How busy each machine is, beside its name. Off, no machine is asked."],
+    ["stats", "CPU, memory and disk", "How busy and how full each machine is, beside its name. Off, no machine is asked."],
     ["addMachine", "Add machine", "The line that connects another machine."],
     ["closed", "Recently closed", "Claude Code sessions that ended, to reopen where they left off."],
     ["cleanup", "Clean up old sessions", "A line that closes every session idle for too long, on a second click."],

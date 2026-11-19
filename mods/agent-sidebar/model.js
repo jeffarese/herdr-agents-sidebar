@@ -544,15 +544,25 @@ export function previewOf(rows, spaces, plan, skip = new Set()) {
 // answer it. Never to a shell, where it would run.
 export const canReply = row => Boolean(row?.available && row.kind === "agent" && !row.inner && row.reported !== "blocked");
 
-// How busy a machine is (background.js parseStats), beside its name: CPU and memory in use,
-// quiet until one runs high, then a warning (1) and worse (2) at herdr-stats' thresholds.
+// How busy a machine is (background.js parseStats), beside its name: CPU, memory and disk in
+// use, quiet until one runs high, then a warning (1) and worse (2) at herdr-stats' thresholds.
 // Memory goes by its pressure where the machine says it (a Mac keeps most of its memory in use,
 // and only the pressure says it is short), else by how much of it is used.
-export const STAT_LEVELS = { cpu: [0.7, 0.9], used: [0.8, 0.92], pressure: [0.5, 0.75] };
+export const STAT_LEVELS = { cpu: [0.7, 0.9], used: [0.8, 0.92], pressure: [0.5, 0.75], disk: [0.85, 0.95] };
 const statLevel = (value, [warn, crit]) => value == null ? 0 : value >= crit ? 2 : value >= warn ? 1 : 0;
 const percent = x => `${Math.round(x * 100)}%`;
-const gigabytes = n => (n / 2 ** 30).toFixed(n < 100 * 2 ** 30 ? 1 : 0).replace(/\.0$/, "");
-// [{ key: "cpu" | "memory", text: "23%", level: 0 | 1 | 2 }], in that order.
+// 52.1 GB, 875 GB, 1.8 TB: one decimal under 100. "52.1 of 64 GB", "875 GB of 1.8 TB".
+function size(n) {
+  const tera = n >= 1000 * 2 ** 30;
+  const v = n / 2 ** (tera ? 40 : 30);
+  return [v.toFixed(v < 100 ? 1 : 0).replace(/\.0$/, ""), tera ? "TB" : "GB"];
+}
+function amount(used, total) {
+  const [[a, unit], [b, of]] = [size(used), size(total)];
+  return unit === of ? `${a} of ${b} ${of}` : `${a} ${unit} of ${b} ${of}`;
+}
+// [{ key: "cpu" | "memory" | "disk", text: "23%", level: 0 | 1 | 2 }], in that order: the
+// order in which they give way when there is no room, from the end.
 export function statFigures(r) {
   const out = [];
   if (r?.cpu != null) out.push({ key: "cpu", text: percent(r.cpu), level: statLevel(r.cpu, STAT_LEVELS.cpu) });
@@ -560,11 +570,13 @@ export function statFigures(r) {
     const used = r.used / r.total;
     out.push({ key: "memory", text: percent(used), level: r.pressure != null ? statLevel(r.pressure, STAT_LEVELS.pressure) : statLevel(used, STAT_LEVELS.used) });
   }
+  if (r?.disk) out.push({ key: "disk", text: percent(r.disk.used / r.disk.total), level: statLevel(r.disk.used / r.disk.total, STAT_LEVELS.disk) });
   return out;
 }
-// "CPU 45% · Memory 52.1 of 64 GB (81%), pressure 33%"
+// "CPU 45% · Memory 52.1 of 64 GB (81%), pressure 33% · Disk 875 GB of 1.8 TB (47%)"
 export const statsText = r => [r?.cpu != null ? `CPU ${percent(r.cpu)}` : "",
-  r?.total ? `Memory ${gigabytes(r.used)} of ${gigabytes(r.total)} GB (${percent(r.used / r.total)})${r.pressure != null ? `, pressure ${percent(r.pressure)}` : ""}` : ""]
+  r?.total ? `Memory ${amount(r.used, r.total)} (${percent(r.used / r.total)})${r.pressure != null ? `, pressure ${percent(r.pressure)}` : ""}` : "",
+  r?.disk ? `Disk ${amount(r.disk.used, r.disk.total)} (${percent(r.disk.used / r.disk.total)})` : ""]
   .filter(Boolean).join(" · ");
 
 // The sidebar's settings, in Herdr's shared state: the person's, so every copy and layout

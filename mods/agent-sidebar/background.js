@@ -275,18 +275,21 @@ export const KINDS = ["laptop", "desktop", "server"];
 export const machineKind = output => KINDS.find(kind => kind === String(output ?? "").trim()) ?? null;
 
 // How busy a machine is, for its heading. POSIX sh; prints one line,
-//   U <cpu %|-> <memory used, bytes> <memory, bytes> <pressure %|->
+//   U <cpu %|-> <memory used> <memory> <pressure %|-> <disk used> <disk>   (sizes in bytes)
 // CPU is the share busy over one second: on a Mac iostat's second report (its first is since
 // boot), elsewhere /proc/stat read a second apart. Memory used is counted as herdr-stats and
 // Activity Monitor count it on a Mac (app, wired and compressed), MemTotal less MemAvailable
-// elsewhere; a Mac's memory pressure is what kern.memorystatus_level leaves free. About 10 ms
-// of work and a second of waiting; it changes nothing.
+// elsewhere; a Mac's memory pressure is what kern.memorystatus_level leaves free. The disk is
+// the one / is on, and used is everything not available, as herdr-stats and Finder count it
+// (on a Mac the other volumes sharing its container too). About 10 ms of work and a second of
+// waiting; it changes nothing.
 export const STATS = `PATH="$PATH:/usr/sbin:/sbin"
+disk=$(df -kP / 2>/dev/null | awk 'NR == 2 && $(NF - 4) > 0 { printf "%.0f %.0f", ($(NF - 4) - $(NF - 2)) * 1024, $(NF - 4) * 1024 }')
 case $(uname -s 2>/dev/null) in
   Darwin)
     cpu=$(iostat -n 0 -c 2 -w 1 2>/dev/null | awk 'END { if (NF >= 3 && $3 ~ /^[0-9]+$/) print 100 - $3; else print "-" }')
     set -- $(sysctl -n hw.memsize kern.memorystatus_level 2>/dev/null)
-    vm_stat 2>/dev/null | awk -v cpu="\${cpu:--}" -v total="\${1:-0}" -v level="\${2:--}" '
+    vm_stat 2>/dev/null | awk -v cpu="\${cpu:--}" -v total="\${1:-0}" -v level="\${2:--}" -v disk="\${disk:-0 0}" '
       /page size of/ { for (i = 1; i < NF; i++) if ($i == "of") page = $(i + 1) }
       /^Anonymous pages:/ { app = $NF + 0 }
       /^Pages purgeable:/ { purge = $NF + 0 }
@@ -297,10 +300,10 @@ case $(uname -s 2>/dev/null) in
         if (used > total) used = total
         pressure = "-"
         if (level ~ /^[0-9]+$/ && level + 0 <= 100) pressure = 100 - level
-        printf "U %s %.0f %.0f %s\\n", cpu, used, total, pressure
+        printf "U %s %.0f %.0f %s %s\\n", cpu, used, total, pressure, disk
       }' ;;
   Linux)
-    { head -n 1 /proc/stat; sleep 1; head -n 1 /proc/stat; cat /proc/meminfo; } 2>/dev/null | awk '
+    { head -n 1 /proc/stat; sleep 1; head -n 1 /proc/stat; cat /proc/meminfo; } 2>/dev/null | awk -v disk="\${disk:-0 0}" '
       $1 == "cpu" { n++; busy[n] = $2 + $3 + $4 + $7 + $8 + $9; idle[n] = $5 + $6 }
       $1 == "MemTotal:" { total = $2 * 1024 }
       $1 == "MemAvailable:" { avail = $2 * 1024; seen = 1 }
@@ -309,7 +312,7 @@ case $(uname -s 2>/dev/null) in
         d = busy[2] - busy[1] + idle[2] - idle[1]
         if (n == 2 && d > 0) cpu = sprintf("%.0f", (busy[2] - busy[1]) * 100 / d)
         if (!seen) total = avail = 0
-        printf "U %s %.0f %.0f -\\n", cpu, total - avail, total
+        printf "U %s %.0f %.0f - %s\\n", cpu, total - avail, total, disk
       }' ;;
 esac
 `;
@@ -318,15 +321,17 @@ esac
 export const STATS_MS = 10000;
 export const STATS_STALE_MS = 45000;
 const share = n => Math.min(Math.max(n, 0), 100) / 100;
-// What STATS printed: { cpu, used, total, pressure, at } (cpu and pressure fractions of one or
-// null, memory null when it said none), or null when it said nothing.
+// { used, total } of memory or disk, or null when there is none to tell.
+const part = (used, total) => Number.isFinite(total) && total > 0 && Number.isFinite(used) ? { used: Math.min(Math.max(used, 0), total), total } : null;
+// What STATS printed: { cpu, used, total, pressure, disk: { used, total }, at } (cpu and pressure
+// fractions of one or null, memory and disk null when it said none), or null when it said nothing.
 export function parseStats(output, at = Date.now()) {
-  const m = /^U (-|\d{1,3}) (\d{1,20}) (\d{1,20}) (-|\d{1,3})$/m.exec(String(output ?? ""));
+  const m = /^U (-|\d{1,3}) (\d{1,20}) (\d{1,20}) (-|\d{1,3})(?: (\d{1,20}) (\d{1,20}))?$/m.exec(String(output ?? ""));
   if (!m) return null;
-  const total = Number(m[3]);
-  const reading = { cpu: m[1] === "-" ? null : share(Number(m[1])), used: total > 0 ? Math.min(Number(m[2]), total) : null,
-    total: total > 0 ? total : null, pressure: m[4] === "-" ? null : share(Number(m[4])), at };
-  return reading.cpu === null && reading.total === null ? null : reading;
+  const memory = part(Number(m[2]), Number(m[3]));
+  const reading = { cpu: m[1] === "-" ? null : share(Number(m[1])), used: memory?.used ?? null, total: memory?.total ?? null,
+    pressure: m[4] === "-" ? null : share(Number(m[4])), disk: part(Number(m[5]), Number(m[6])), at };
+  return reading.cpu === null && reading.total === null && !reading.disk ? null : reading;
 }
 // herdr-stats' snapshot of this computer (its file: herdr-stats/snapshot.json in the cache
 // folder), when its sampler is running: the same figures, read rather than measured again.
@@ -336,11 +341,11 @@ export function snapshotStats(text, now = Date.now(), fresh = 5000) {
   try { snap = JSON.parse(text); } catch { return null; }
   if (snap?.v !== 1 || !Number.isFinite(snap.t) || Math.abs(now - snap.t) > fresh) return null;
   const fraction = n => Number.isFinite(n) ? Math.min(Math.max(n, 0), 1) : null;
-  const { total, used } = snap.mem ?? {};
-  const memory = Number.isFinite(total) && total > 0 && Number.isFinite(used);
-  const reading = { cpu: fraction(snap.cpu?.total), used: memory ? Math.min(Math.max(used, 0), total) : null, total: memory ? total : null,
-    pressure: fraction(snap.mem?.pressure), at: snap.t };
-  return reading.cpu === null && reading.total === null ? null : reading;
+  const memory = part(snap.mem?.used, snap.mem?.total);
+  // Its disk is full by whatever isn't available, as this script counts it.
+  const reading = { cpu: fraction(snap.cpu?.total), used: memory?.used ?? null, total: memory?.total ?? null,
+    pressure: fraction(snap.mem?.pressure), disk: part(snap.disk?.total - snap.disk?.available, snap.disk?.total), at: snap.t };
+  return reading.cpu === null && reading.total === null && !reading.disk ? null : reading;
 }
 
 // What each folder has changed since its last commit, and its branch's pull request. POSIX sh;

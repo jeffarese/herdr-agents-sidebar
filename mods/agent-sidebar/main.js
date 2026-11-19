@@ -9,6 +9,9 @@ import { demo } from "./demo.js";
 
 const ART = "mods/agent-sidebar/";
 const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
+// Beside a remote machine's name: it is reached through herdr-core, elsewhere.
+const remoteMark = (color, key) => div().id(`remote-${key}`).flex_none().flex().items_center().tooltip("Remote: reached through herdr-core")
+  .child(glyph("globe", 12).text_color(color));
 const hostState = host => host.layout === "ready" ? "" : host.layout === "loading" ? "Connecting…" : "Unavailable";
 // A machine that can't be reached: one quiet line after the others, its sessions behind a click.
 const isAway = host => host.remote && host.layout === "unavailable";
@@ -1171,7 +1174,7 @@ export default class AgentSidebar extends View {
     // The figures take the room the name leaves, and go when there is too little (the tooltip
     // keeps them). Roughly: the padding, chevron and icon; the name and its tag; the summary,
     // count and buttons at the end.
-    const room = this.width - 12 - 50 - Math.ceil(group.label.length * 6.4) - (group.remote ? 50 : 0)
+    const room = this.width - 12 - 50 - Math.ceil(group.label.length * 6.1) - (group.remote ? 18 : 0)
       - summary.length * 30 - 60 - (space ? 30 : 0) - 8;
     const shown = reading ? statFigures(reading).slice(0, Math.max(0, Math.floor((room + STAT_GAP) / (STAT_WIDTH + STAT_GAP)))) : [];
     const tones = [t.muted, t.ansi3 ?? t.working, t.ansi1 ?? t.blocked];
@@ -1184,7 +1187,7 @@ export default class AgentSidebar extends View {
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().min_w(0).truncate().font_semibold().text_size(12).text_color(t.foreground).child(group.label))
-          .when(group.remote, el => el.child(div().flex_none().px(4).py(1).rounded(4).bg(t.raised).text_size(8.5).font_semibold().text_color(color).child("REMOTE")))
+          .when(group.remote, el => el.child(remoteMark(color, group.key)))
           .when(shown.length > 0, el => el.child(h_flex().id(`stats-${group.key}`).flex_none().ml(2).gap(STAT_GAP).items_center().tooltip(busy)
             .children(shown.map(f => h_flex().id(`stat-${group.key}-${f.key}`).flex_none().gap(3).items_center()
               .child(glyph(f.key, 11).text_color(f.level ? tones[f.level] : t.dim))

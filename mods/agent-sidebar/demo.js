@@ -56,9 +56,10 @@ export function demo(now = Date.now()) {
     "agent-sidebar.closed": [{ title: "Compare two caching layers", cwd: "/Users/me/code/api", machine: null, session: "demo-1", at: now - 20 * MINUTE }],
   };
   const machines = [{ name: null, layout: "ready" }, { name: "studio", layout: "ready" }, { name: "attic", layout: "unavailable" }];
-  // How busy each machine is (background.js STATS): this one at ease, the studio training hard.
+  // How busy each machine is (background.js STATS): this one at ease, the studio training hard
+  // and filling its disk.
   const GB = 2 ** 30;
-  const busy = (cpu, used, total, pressure) => ({ reading: { cpu, used: used * GB, total: total * GB, pressure, at: Number.MAX_SAFE_INTEGER }, asked: Infinity, asking: false });
-  const stats = new Map([[null, busy(0.18, 21.4, 32, 0.12)], ["studio", busy(0.86, 97, 128, 0.31)]]);
+  const busy = (cpu, used, total, pressure, disk, size) => ({ reading: { cpu, used: used * GB, total: total * GB, pressure, disk: { used: disk * GB, total: size * GB }, at: Number.MAX_SAFE_INTEGER }, asked: Infinity, asking: false });
+  const stats = new Map([[null, busy(0.18, 21.4, 32, 0.12, 412, 926)], ["studio", busy(0.86, 97, 128, 0.31, 3480, 3815)]]);
   return { machines, terminals, panes, spaces, focused: { terminal: "t5", space: "s1" }, work, git, stats, shared };
 }

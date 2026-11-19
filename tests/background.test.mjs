@@ -290,28 +290,35 @@ test("what a tool call is about is read from its start, however it was cut", () 
 });
 
 test("how busy a machine is reads from one line; anything else is no answer", () => {
-  assert.deepEqual(parseStats("U 23 55902535680 68719476736 33\n", 5), { cpu: 0.23, used: 55902535680, total: 68719476736, pressure: 0.33, at: 5 });
-  // Linux has no pressure; a machine with no memory figure still has its CPU, and the reverse.
-  assert.deepEqual(parseStats("U 7 3000 8000 -", 5), { cpu: 0.07, used: 3000, total: 8000, pressure: null, at: 5 });
-  assert.deepEqual(parseStats("U 40 0 0 -", 5), { cpu: 0.4, used: null, total: null, pressure: null, at: 5 });
-  assert.deepEqual(parseStats("noise\nU - 9000 8000 -\n", 5), { cpu: null, used: 8000, total: 8000, pressure: null, at: 5 });
-  for (const junk of ["U - 0 0 -", "U 23 1 2", "U x 1 2 3", "U 2345 1 2 3", "", undefined]) assert.equal(parseStats(junk), null, junk);
+  assert.deepEqual(parseStats("U 23 55902535680 68719476736 33 939732115456 1995165736960\n", 5),
+    { cpu: 0.23, used: 55902535680, total: 68719476736, pressure: 0.33, disk: { used: 939732115456, total: 1995165736960 }, at: 5 });
+  // Linux has no pressure; a machine with no memory or disk figure still has the others.
+  assert.deepEqual(parseStats("U 7 3000 8000 - 0 0", 5), { cpu: 0.07, used: 3000, total: 8000, pressure: null, disk: null, at: 5 });
+  assert.deepEqual(parseStats("U 40 0 0 - 10 20", 5), { cpu: 0.4, used: null, total: null, pressure: null, disk: { used: 10, total: 20 }, at: 5 });
+  assert.deepEqual(parseStats("noise\nU - 9000 8000 -\n", 5), { cpu: null, used: 8000, total: 8000, pressure: null, disk: null, at: 5 });
+  assert.deepEqual(parseStats("U - 0 0 - 5 4", 5).disk, { used: 4, total: 4 });
+  for (const junk of ["U - 0 0 -", "U - 0 0 - 0 0", "U 23 1 2", "U 23 1 2 3 4", "U x 1 2 3", "U 2345 1 2 3", "", undefined]) assert.equal(parseStats(junk), null, junk);
 });
 
 test("this computer's figures come from herdr-stats' snapshot while it is fresh", () => {
-  const snap = (extra = {}) => JSON.stringify({ v: 1, t: 1000, cpu: { total: 0.403 }, mem: { used: 55300292608, total: 68719476736, pressure: 0.32 }, ...extra });
-  assert.deepEqual(snapshotStats(snap(), 3000), { cpu: 0.403, used: 55300292608, total: 68719476736, pressure: 0.32, at: 1000 });
+  const snap = (extra = {}) => JSON.stringify({ v: 1, t: 1000, cpu: { total: 0.403 }, mem: { used: 55300292608, total: 68719476736, pressure: 0.32 },
+    disk: { available: 1055434911744, total: 1995165736960, used: 13759616000 }, ...extra });
+  // Its disk is full by whatever isn't available, not by what its own volume uses.
+  assert.deepEqual(snapshotStats(snap(), 3000), { cpu: 0.403, used: 55300292608, total: 68719476736, pressure: 0.32, disk: { used: 1995165736960 - 1055434911744, total: 1995165736960 }, at: 1000 });
   assert.equal(snapshotStats(snap(), 7000), null); // its sampler stopped
   assert.equal(snapshotStats(snap({ v: 2 }), 3000), null);
-  assert.deepEqual(snapshotStats(snap({ mem: null }), 3000), { cpu: 0.403, used: null, total: null, pressure: null, at: 1000 });
-  for (const junk of [null, "", "{", "[]", snap({ t: "now" }), snap({ cpu: null, mem: null })]) assert.equal(snapshotStats(junk, 3000), null, junk);
+  assert.deepEqual(snapshotStats(snap({ mem: null, disk: null }), 3000), { cpu: 0.403, used: null, total: null, pressure: null, disk: null, at: 1000 });
+  for (const junk of [null, "", "{", "[]", snap({ t: "now" }), snap({ cpu: null, mem: null, disk: null })]) assert.equal(snapshotStats(junk, 3000), null, junk);
 });
 
 // Stand-ins for the commands STATS runs, as a Mac and a Linux machine print them.
+// df's sizes are in KB; used is everything not available.
+const DF = "printf 'Filesystem     1024-blocks      Used  Available Capacity  Mounted on\\n/dev/disk3s1s1  1948404040  13759616 1030697716     2%%    /\\n'";
+const DISK = `${(1948404040 - 1030697716) * 1024} ${1948404040 * 1024}`;
 function standIns(t, system, commands) {
   const bin = mkdtempSync(join(tmpdir(), "agent-sidebar-stats-"));
   t.after(() => rmSync(bin, { recursive: true, force: true }));
-  for (const [name, body] of Object.entries({ uname: `echo ${system}`, ...commands })) {
+  for (const [name, body] of Object.entries({ uname: `echo ${system}`, df: DF, ...commands })) {
     writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
     chmodSync(join(bin, name), 0o755);
   }
@@ -332,7 +339,7 @@ Pages occupied by compressor:                 629724.
 EOF`,
   });
   // CPU from the second report; memory is app (anonymous less purgeable), wired and compressed.
-  assert.equal(out, `U 21 ${(2266227 - 54720 + 489356 + 629724) * 16384} 68719476736 28\n`);
+  assert.equal(out, `U 21 ${(2266227 - 54720 + 489356 + 629724) * 16384} 68719476736 28 ${DISK}\n`);
 });
 
 test("a Linux machine is measured from /proc, a second apart", { skip: !existsSync("/bin/sh") }, t => {
@@ -342,10 +349,12 @@ test("a Linux machine is measured from /proc, a second apart", { skip: !existsSy
     sleep: ":",
     cat: "printf 'MemTotal:       16000000 kB\\nMemFree:         2000000 kB\\nMemAvailable:    6000000 kB\\n'",
   });
-  assert.equal(out, `U 25 ${10000000 * 1024} ${16000000 * 1024} -\n`);
+  assert.equal(out, `U 25 ${10000000 * 1024} ${16000000 * 1024} - ${DISK}\n`);
+  // No df: no disk, and the rest as before.
+  assert.equal(standIns(t, "Darwin", { df: "exit 1", iostat: "echo '16 5 79'", sysctl: "printf '100\\n50\\n'", vm_stat: "echo" }), "U 21 0 100 50 0 0\n");
 });
 
 test("this machine says how busy it is", { skip: !["darwin", "linux"].includes(process.platform) }, () => {
   const reading = parseStats(execFileSync("/bin/sh", ["-c", STATS], { encoding: "utf8" }));
-  assert.ok(reading && reading.cpu !== null && reading.total > 0 && reading.used > 0, JSON.stringify(reading));
+  assert.ok(reading && reading.cpu !== null && reading.total > 0 && reading.used > 0 && reading.disk?.total > 0, JSON.stringify(reading));
 });

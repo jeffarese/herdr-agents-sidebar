@@ -314,8 +314,7 @@ function header(view, t, remote) {
   if (all.length < 2) return h_flex().h(26).px(4).gap(8).items_center()
     .child(glyph(remote ? "server" : "computer", 15).text_color(remote ? t.ansi4 : t.accent))
     .child(div().min_w(0).truncate().font_semibold().text_color(t.foreground).child(view.machine ?? "Local"))
-    .when(remote, el => el.child(div().flex_none().px(4).py(1).rounded(4).bg(t.raised).text_size(8.5).font_semibold()
-      .text_color(t.ansi4).child("REMOTE")))
+    .when(remote, el => el.child(glyph("globe", 12).text_color(t.ansi4)))
     .child(div().flex_1())
     .child(div().text_size(10.5).text_color(t.dim).child("New session"));
   const chip = host => {

@@ -399,4 +399,10 @@ test("a machine's figures are quiet until one runs high; memory goes by its pres
   assert.equal(statsText({ cpu: 0.45, used: 52.1 * GB, total: 64 * GB, pressure: 0.33 }), "CPU 45% · Memory 52.1 of 64 GB (81%), pressure 33%");
   assert.equal(statsText({ cpu: null, used: 97 * GB, total: 128 * GB, pressure: null }), "Memory 97 of 128 GB (76%)");
   assert.equal(statsText({ cpu: 0.05, used: 0.6 * GB, total: 1 * GB, pressure: null }), "CPU 5% · Memory 0.6 of 1 GB (60%)");
+  // The disk, full at 85% and 95%, in TB once there are a thousand GB.
+  const disk = (used, total) => ({ cpu: null, used: null, total: null, pressure: null, disk: { used: used * GB, total: total * GB } });
+  assert.deepEqual([said(disk(412, 926)), said(disk(421, 494)), said(disk(3700, 3815))], [["disk 44% 0"], ["disk 85% 1"], ["disk 97% 2"]]);
+  assert.deepEqual(said({ cpu: 0.2, used: 1, total: 2, pressure: null, disk: { used: 1, total: 4 } }).map(f => f.split(" ")[0]), ["cpu", "memory", "disk"]);
+  assert.equal(statsText(disk(875.2, 1858.1)), "Disk 875 GB of 1.8 TB (47%)");
+  assert.equal(statsText(disk(3480, 3815)), "Disk 3.4 of 3.7 TB (91%)");
 });
