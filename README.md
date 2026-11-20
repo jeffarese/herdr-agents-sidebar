@@ -7,7 +7,9 @@ on this computer and on your other machines, in one list grouped by machine and 
 needs from you. Agents that finished their turn but left work running stay under Cooking, and
 Claude Code's sub-agents appear under the session that started them.
 
-![Herdr's sidebar, titled Sessions 11, with a star and a gear. Under "Local", a laptop, with its CPU at 18%, its memory at 67% and its disk at 44% beside the name: Needs you, "Rotate the API signing keys" asking "Rotate the staging keys too?"; Done, "Fix the flaky checkout test" in web on fix-checkout, +42 −7, pull request #128; Cooking, "Upgrade the build to Node 22" running the test suite, Opus · xhigh, "Add retries to the webhook client" editing client.js with a flag for its goal, Fable 5.2 · high, and "Migrate the billing schema", selected, with two sub-agents under it, "Check the migration on a copy" and "Find every query on invoices"; Pinned, "Tidy the logging setup", +310 −96; Idle, "Write the release notes" with pull request #131, Haiku 5.5 · low, and the shell "zsh · api". Under "studio", a server marked remote by a small globe, at 86% CPU and with its disk 91% full, both in amber, and 76% memory: Cooking, "Train the ranking model" training for 20 epochs, Fable · max; Idle, "Profile the image pipeline". Then one dim line, "attic · Unavailable", Add machine, and Recently closed 1. These are example sessions.](preview.png)
+![The Sessions sidebar on the left of a Herdr window; the rest of the window is dimmed. The sidebar, titled Sessions 12 with a star, a gear and a button to fold it, lists under "Local", a laptop followed by its CPU, memory and disk: Needs you, "Rotate the API signing keys", wanting Bash to rotate the staging keys; Done, "Fix the flaky checkout test" in a worktree of shop, +42 −7 and pull request #128; Cooking, "Add retries to the webhook client" editing a migration, with the flag of an open goal and its Codex sub-agent "Review the retry change" under it, +85 −6 #1203, then "Speed up the checkout page", selected, reading useCartTotals.ts, with two Claude Code sub-agents under it, "Find useCartTotals callers" (Explore) and "Profile the checkout" (general-purpose); Idle, the shell dev-server, "Update the docs for the new API" with +52 −9, "Write the release notes" with the pointer on it, showing Haiku · low and its buttons to send it a message, move it, start a session in its folder, pin it and close it, then the api server and shop's dev server with their branches and changes. Under "studio", a desktop marked remote by a small globe, followed by its CPU and memory: Cooking, "Train the ranking model" at epoch 12 of 20; Idle, "Benchmark the search index". Then "attic · Unavailable", Add machine, and Recently closed 1. Behind the dim: Claude Code speeding up the checkout page in the middle under a header with its model and limits, pull requests, system stats and running servers on the right, and two notifications in the bottom right corner. The sessions are made up.](preview.png)
+
+*Around it: Claude Code under a pane header with the model and limits, [pull requests](https://github.com/jeffarese/herdr-prs) and [stats](https://github.com/jeffarese/herdr-stats-mod) on the right with what's running, and two notifications in the corner. Every session in it is made up.*
 
 This is an unofficial mod. It is not affiliated with Herdr.
 
@@ -118,6 +120,8 @@ per copy of the sidebar. When the sidebar is narrower than 210 px it becomes a r
 and a button at its top widens it again.
 
 ### Sections and marks
+
+<img src="docs/media/sidebar.png" width="298" alt="The Sessions sidebar alone. Under Local, a laptop followed by its CPU, memory and disk: Needs you, one session asking for Bash; Done, one session with +42 −7 and pull request #128; Cooking, two sessions with their spinners, one with a Codex sub-agent in a terminal of its own and the selected one with two Claude Code sub-agents, Explore and general-purpose, under it; Idle, a program running in no space, two agents and the two tabs running servers, the row of one agent with the pointer on it showing its buttons. Under studio, a desktop marked remote by a globe, followed by its CPU and memory: one session cooking, one idle. Then attic, Unavailable, Add machine, and Recently closed 1. The sessions are made up.">
 
 With only this computer connected there are no machine headings, and its **+** sits beside
 Settings in the title bar.
@@ -251,7 +255,6 @@ terminals. `node scripts/bench.mjs` measures it on your machine (`--live` adds y
 npm test                           # node --test, including the probe script in each local shell
 herdr-app check mods/agent-sidebar # Herdr's own checker, which renders the mod once
 npm run bench                      # the benchmarks above
-python3 scripts/preview.py         # preview.png again, from example sessions (needs Pillow)
 ```
 
 - **`mods/agent-sidebar/model.js`** turns Herdr's terminals into rows, sections and counts. It
@@ -262,11 +265,23 @@ python3 scripts/preview.py         # preview.png again, from example sessions (n
   and `launcher.js` the launcher behind each machine's **+**.
 - **`mods/agent-sidebar/folders.js`** picks the folders the launcher offers and where a session
   there opens, and holds its two `sh` scripts. Plain JavaScript too.
-- **`mods/agent-sidebar/settings.js`** is the window behind the gear, and **`demo.js`** the example
-  sessions of the picture above: `agent-sidebar.demo` opens a copy that shows them and asks no
-  machine anything.
+- **`mods/agent-sidebar/settings.js`** is the window behind the gear, and **`demo.js`** a set of
+  example sessions: `agent-sidebar.demo` opens a copy that shows them and asks no machine
+  anything.
 - **`scripts/install.py`** installs, updates and removes it; `install.sh` fetches the repository
   when run on its own.
+- **`docs/demo/`** sets up the scene of the pictures in this README, on a made-up Herdr window
+  with every mod running; its `README.md` says how to take them again.
+
+## Works well with
+
+The pictures above are one Herdr window with these mods running together:
+
+- [Pull requests](https://github.com/jeffarese/herdr-prs): your pull requests and the state of their checks, in a sidebar.
+- [Stats](https://github.com/jeffarese/herdr-stats-mod): CPU, memory, GPU, network and temperatures beside your terminals, and which agent is using them.
+- [Quick switcher](https://github.com/jeffarese/herdr-bar-mod): ⌘K to any agent, tab, pane or space on every machine.
+- [Mod hub](https://github.com/jeffarese/herdr-mod-hub): browse the gallery, read a mod's code before installing it, and manage your mods.
+- [Outside](https://github.com/jeffarese/herdr-outside): the agents and terminals herdr-core runs outside your spaces.
 
 ## License
 
