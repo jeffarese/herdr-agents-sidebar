@@ -24,7 +24,7 @@ const SWITCHES = {
     ["animations", "Animate changes", "Rows slide to their new place, and a new status fades in."],
   ],
   list: [
-    ["subagents", "Sub-agents", "Claude Code's own sub-agents, under their session. Hidden, they still keep it in Working."],
+    ["subagents", "Sub-agents", "Claude Code's own sub-agents, under their session. Hidden, they still keep it in Cooking."],
     ["shells", "Shells and programs", "Terminals that run no agent."],
     ["away", "Machines that are away", "One dim line for each machine Herdr can't reach, after the others."],
     ["stats", "CPU, memory and disk", "How busy and how full each machine is, beside its name. Off, no machine is asked."],
@@ -87,7 +87,7 @@ export function renderSettings(view) {
     layout: () => [
       choice("set-density", "Rows", "Expanded gives each session a second line: where it works, what it does and what it runs with.",
         [["compact", "Compact"], ["expanded", "Expanded"]], density, key => setShared(DENSITY_KEY, key)),
-      choice("set-group", "Group by", "Status: Needs you, Done, Working, Pinned, Idle. Space: each of Herdr's spaces. Project: spaces of one name on every machine, as one.",
+      choice("set-group", "Group by", "Status: Needs you, Done, Cooking, Pinned, Idle. Space: each of Herdr's spaces. Project: spaces of one name on every machine, as one.",
         [["status", "Status"], ["space", "Space"], ["project", "Project"]], group, key => setShared(GROUP_KEY, key)),
       ...SWITCHES.layout.map(item => toggle(item)),
     ],

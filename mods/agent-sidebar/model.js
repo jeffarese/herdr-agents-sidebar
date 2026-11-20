@@ -1,7 +1,7 @@
 // Pure presentation model. Machine identity comes from Herdr, never from a folder name.
 import { STALE_MS } from "./background.js";
 
-export const WORDS = { blocked: "Needs you", done: "Done", working: "Working", idle: "Idle", unknown: "No status" };
+export const WORDS = { blocked: "Needs you", done: "Done", working: "Cooking", idle: "Idle", unknown: "No status" };
 const PRIORITY = { blocked: 60, done: 50, working: 40 };
 export const machineOf = address => address?.includes("/") ? address.slice(0, address.indexOf("/")) : null;
 const statusOf = status => status === "error" ? "blocked" : Object.hasOwn(WORDS, status) ? status : "unknown";
@@ -208,7 +208,7 @@ export function backgroundLines(row, now = Date.now()) {
 export const SECTIONS = [
   { id: "blocked", label: "Needs you", status: "blocked" },
   { id: "done", label: "Done", status: "done" },
-  { id: "working", label: "Working", status: "working" },
+  { id: "working", label: "Cooking", status: "working" },
   { id: "pinned", label: "Pinned", status: null },
   { id: "idle", label: "Idle", status: null },
 ];

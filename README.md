@@ -4,10 +4,10 @@
 
 A sidebar for the [Herdr](https://herdr.dev) desktop app: every agent, shell and program you run,
 on this computer and on your other machines, in one list grouped by machine and by what each one
-needs from you. Agents that finished their turn but left work running stay under Working, and
+needs from you. Agents that finished their turn but left work running stay under Cooking, and
 Claude Code's sub-agents appear under the session that started them.
 
-![Herdr's sidebar, titled Sessions 11, with a star and a gear. Under "Local", a laptop, with its CPU at 18%, its memory at 67% and its disk at 44% beside the name: Needs you, "Rotate the API signing keys" asking "Rotate the staging keys too?"; Done, "Fix the flaky checkout test" in web on fix-checkout, +42 −7, pull request #128; Working, "Upgrade the build to Node 22" running the test suite, Opus · xhigh, "Add retries to the webhook client" editing client.js with a flag for its goal, Fable 5.2 · high, and "Migrate the billing schema", selected, with two sub-agents under it, "Check the migration on a copy" and "Find every query on invoices"; Pinned, "Tidy the logging setup", +310 −96; Idle, "Write the release notes" with pull request #131, Haiku 5.5 · low, and the shell "zsh · api". Under "studio", a server marked remote by a small globe, at 86% CPU and with its disk 91% full, both in amber, and 76% memory: Working, "Train the ranking model" training for 20 epochs, Fable · max; Idle, "Profile the image pipeline". Then one dim line, "attic · Unavailable", Add machine, and Recently closed 1. These are example sessions.](preview.png)
+![Herdr's sidebar, titled Sessions 11, with a star and a gear. Under "Local", a laptop, with its CPU at 18%, its memory at 67% and its disk at 44% beside the name: Needs you, "Rotate the API signing keys" asking "Rotate the staging keys too?"; Done, "Fix the flaky checkout test" in web on fix-checkout, +42 −7, pull request #128; Cooking, "Upgrade the build to Node 22" running the test suite, Opus · xhigh, "Add retries to the webhook client" editing client.js with a flag for its goal, Fable 5.2 · high, and "Migrate the billing schema", selected, with two sub-agents under it, "Check the migration on a copy" and "Find every query on invoices"; Pinned, "Tidy the logging setup", +310 −96; Idle, "Write the release notes" with pull request #131, Haiku 5.5 · low, and the shell "zsh · api". Under "studio", a server marked remote by a small globe, at 86% CPU and with its disk 91% full, both in amber, and 76% memory: Cooking, "Train the ranking model" training for 20 epochs, Fable · max; Idle, "Profile the image pipeline". Then one dim line, "attic · Unavailable", Add machine, and Recently closed 1. These are example sessions.](preview.png)
 
 This is an unofficial mod. It is not affiliated with Herdr.
 
@@ -123,15 +123,15 @@ With only this computer connected there are no machine headings, and its **+** s
 Settings in the title bar.
 
 Each machine lists its sessions in the sections Herdr's Agents list uses, most urgent first. A
-section's heading is a gray label with a dot in its status's color (a ring for Pinned and Idle),
-and its chevron shows while it is folded or pointed at:
+section's heading is a gray label with its rows' mark in its status's color (a pin for Pinned, a
+ring for Idle), and its chevron shows while it is folded or pointed at:
 
 | Section | Mark | What it means |
 | --- | --- | --- |
 | Needs you | Red **!** | Waiting on a permission or a question |
 | Done | Check | Finished a turn you haven't looked at |
-| Working | Turning ring | Working on a turn |
-| Working | Pulsing prompt, robot or flag | Its turn is over, but something it started still runs (below) |
+| Cooking | Turning ring | Working on a turn |
+| Cooking | Pulsing prompt, robot or flag | Its turn is over, but something it started still runs (below) |
 | Pinned | Small ring | A pinned session with nothing to report |
 | Idle | Nothing | Waiting for you to say something, or a shell or program with no status |
 
@@ -150,7 +150,7 @@ finished sub-agent's news is its parent's to report.
 ### Work that goes on after a turn
 
 Herdr marks an agent done or idle when its turn ends. With Claude Code, that can happen while
-the agent still waits on something it started. The sidebar keeps such an agent under Working,
+the agent still waits on something it started. The sidebar keeps such an agent under Cooking,
 and its mark says what it waits on:
 
 - **A prompt mark:** a background shell or monitor, such as a test run or a dev server. The

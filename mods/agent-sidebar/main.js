@@ -805,7 +805,7 @@ export default class AgentSidebar extends View {
       : row.kind === "shell" ? "Shell" : row.kind === "process" ? "Program" : "Agent";
     const context = [...new Set([kind, row.space === row.title ? "" : row.space, row.program?.name].filter(Boolean))].join(" · ");
     const word = !row.background.length ? WORDS[row.status]
-      : row.background.some(reason => reason !== "goal") ? "Working in the background" : "Goal active";
+      : row.background.some(reason => reason !== "goal") ? "Cooking in the background" : "Goal active";
     const state = !row.available ? "Unavailable" : row.kind === "agent" && row.since ? `${word} · ${duration(now - row.since)}` : word;
     const from = !row.parent ? "" : row.inner ? `Inside ${row.parent}` : `Started from ${row.parent}`;
     const git = this.gitOf(row);
@@ -1084,14 +1084,25 @@ export default class AgentSidebar extends View {
         .when(row.background.length > 0, el => el.loop("opacity", { from: 0.4, to: 1, period: 1600 })));
   }
 
-  // A section's heading is a quiet label: a dot carries the status's color, so the colors in
+  // A status heading wears the mark its sessions' rows do: the spinner for Cooking, the check
+  // for Done, the ! for Needs you; Pinned a pin and Idle the ring.
+  sectionMark(t, id) {
+    if (id === "working") return glyph("spinner", 11).spin(900);
+    if (id === "done") return glyph("check", 11);
+    if (id === "blocked") return div().size(13).rounded(4).bg(t.blocked + "26").text_size(9.5).font_bold()
+      .flex().items_center().justify_center().child("!");
+    if (id === "pinned") return glyph("pin", 11);
+    return div().size(7).rounded(4).border(1.5).border_color(t.idle ?? t.dim);
+  }
+
+  // A section's heading is a quiet label: a mark carries the status's color, so the colors in
   // the list are the sessions' own marks. Its chevron shows while it is folded or pointed at.
   // `first`: the first under its machine, with no space above it.
   section(t, group, section, first = true) {
     const key = `${group.key}:${section.id}`;
     const open = this.isOpen(key);
-    // A status's section (Needs you leads whatever the grouping): a dot, filled in the status's
-    // color, or a ring for Pinned and Idle, which have none. Not a space's or a project's.
+    // A status's section (Needs you leads whatever the grouping): its status's mark, in its
+    // color. Not a space's or a project's.
     const byStatus = !/^(space|project):/.test(section.id);
     const pointed = this.hoveredSection === key;
     // Sessions: a session's own sub-agents are part of it.
@@ -1136,9 +1147,8 @@ export default class AgentSidebar extends View {
       .on_mouse_up("left", (_e, cx) => this.release(cx, group, section))
       .when(Boolean(dot), el => el.child(div().id(`color-${key}`).size(8).flex_none().rounded(4).bg(dot).cursor_pointer().tooltip("Change color")
         .on_click((_e, cx) => { cx.stop_propagation(); if (!this.preview) this.recolor(space); cx.notify(); })))
-      .when(byStatus, el => el.child(div().id(`status-${key}`).size(6).flex_none().rounded(3)
-        .when(Boolean(section.status), el => el.bg(t[section.status]))
-        .when(!section.status, el => el.border(1).border_color(t.dim))))
+      .when(byStatus, el => el.child(div().id(`status-${key}`).size(14).flex_none().flex().items_center().justify_center()
+        .text_color(section.status ? t[section.status] : t.dim).child(this.sectionMark(t, section.id))))
       .child(div().min_w(0).truncate().text_color(target ? t.foreground : t.muted).child(section.label))
       .child(div().flex_none().text_color(t.dim).child(String(n)))
       .when(Boolean(fresh), el => el.child(div().id(`fresh-${key}`).flex_none().max_w(120).truncate().px(4).rounded(4).bg(t.accent + "22").text_size(9.5).text_color(t.accent).child(fresh)))

@@ -260,7 +260,7 @@ test("a folded host summarizes what needs you, works and is done", () => {
   root = h.view.render();
   const header = find(root, "host-remote:work");
   assert.equal(find(root, "agent-work/t1"), null);
-  assert.deepEqual(header.nodes.map(n => n.props?.tooltip).filter(tip => /needs you|working|done/.test(tip ?? "")), ["1 needs you", "1 working"]);
+  assert.deepEqual(header.nodes.map(n => n.props?.tooltip).filter(tip => /needs you|cooking|done/.test(tip ?? "")), ["1 needs you", "1 cooking"]);
 });
 
 test("sub-agents sit under their parent and lift it into their most urgent section", () => {
@@ -341,13 +341,13 @@ test("an agent waiting on background work sits in Working with a pulsing mark th
   const t1 = find(root, "agent-t1");
   const mark = glyphs(t1).find(g => /terminal\.svg$/.test(g.props.src));
   assert.deepEqual(mark.props.loop, ["opacity", { from: 0.4, to: 1, period: 1600 }]);
-  assert.match(t1.props.tooltip, /Working in the background · 12m\nShell: npm test · 4m/);
+  assert.match(t1.props.tooltip, /Cooking in the background · 12m\nShell: npm test · 4m/);
   // The goal flag shows beside a working agent; its mark stays the spinner.
   const t2 = find(root, "agent-t2");
   assert.equal(find(t2, "goal-t2").props.tooltip, "Goal: Port the parser");
   assert.ok(glyphs(t2).some(g => /spinner\.svg$/.test(g.props.src)));
   // Both count as working, and neither as done.
-  assert.match(text(find(root, "section-local:working")), /Working 2/);
+  assert.match(text(find(root, "section-local:working")), /Cooking 2/);
   assert.equal(find(root, "section-local:done"), null);
 });
 
@@ -441,11 +441,11 @@ test("Claude Code's own sub-agents sit under their session, open it, and count a
   const sub = find(root, "agent-t1#a1");
   assert.ok(sub.props.pl > parent.props.pl);
   assert.match(parent.props.tooltip, /Sub-agent: Review the repo/);
-  assert.match(sub.props.tooltip, /^Review the repo\nSub-agent, in the background · general-high\nLocal\nWorking · 3m/);
+  assert.match(sub.props.tooltip, /^Review the repo\nSub-agent, in the background · general-high\nLocal\nCooking · 3m/);
   assert.match(text(sub), /Review the repo general-high 3m/);
   // Counted as part of its session, and not a terminal for next/previous agent.
   assert.equal(text(find(root, "sessions-count")), "2");
-  assert.match(text(find(root, "section-local:working")), /Working 1/);
+  assert.match(text(find(root, "section-local:working")), /Cooking 1/);
   assert.match(text(find(root, "host-local")), /^\s*Local 1/);
   assert.deepEqual(h.order(), ["t1", "work/t1"]);
   // No pin on hover; a click opens the session.
@@ -1043,7 +1043,7 @@ test("grouped by space, each space is a heading with its sessions; every copy fo
   find(root, "section-local:space:s1").props.on_click(null, h.cx);
   root = h.view.render();
   assert.equal(find(root, "agent-t3"), null);
-  assert.deepEqual(find(root, "section-local:space:s1").nodes.map(n => n.props?.tooltip).filter(tip => /working|done|needs/.test(tip ?? "")), ["1 working"]);
+  assert.deepEqual(find(root, "section-local:space:s1").nodes.map(n => n.props?.tooltip).filter(tip => /cooking|done|needs/.test(tip ?? "")), ["1 cooking"]);
   // Then projects, then status again.
   h.view.toggleGroup();
   assert.equal(h.sharedState["agent-sidebar.group"], "project");
@@ -1342,7 +1342,7 @@ test("expanded, the model gives way first on a crowded second line, and the tool
   assert.equal(find(root, "git-t3"), null); // working: what it does takes the folder's place
 });
 
-test("the machine heads the list, a line apart; a section is a quiet label with a dot of its status's color", () => {
+test("the machine heads the list, a line apart; a section is a quiet label with its status's mark in its color", () => {
   const h = setup();
   h.state.terminals.push({ address: "t2", state: "live", status: "working", title: "Busy", program: { name: "Claude", agent: true } });
   let root = h.view.render();
@@ -1354,13 +1354,12 @@ test("the machine heads the list, a line apart; a section is a quiet label with 
   assert.equal(find(root, "host-local").nodes.some(node => node.props?.bg === "#border"), false);
   assert.equal(find(root, "host-remote:work").props.mt, 14);
   assert.ok(find(root, "host-remote:work").nodes.some(node => node.props?.bg === "#border" && node.props.absolute !== undefined));
-  // The label is muted; the color is in its dot. Pinned and Idle have a ring.
+  // The label is muted; the color is in its mark, the one its rows wear.
   const working = find(root, "section-local:working");
-  assert.equal(label(working, "Working").props.text_color, "#muted");
-  assert.equal(find(working, "status-local:working").props.bg, "#working");
-  assert.equal(find(root, "status-remote:work:blocked").props.bg, "#blocked");
-  assert.equal(find(root, "status-local:idle").props.bg, undefined);
-  assert.equal(find(root, "status-local:idle").props.border_color, "#dim");
+  assert.equal(label(working, "Cooking").props.text_color, "#muted");
+  assert.equal(find(working, "status-local:working").props.text_color, "#working");
+  assert.equal(find(root, "status-remote:work:blocked").props.text_color, "#blocked");
+  assert.equal(find(root, "status-local:idle").props.text_color, "#dim");
   // Space above every section but the first of its machine.
   assert.equal(working.props.mt, undefined);
   assert.equal(find(root, "section-local:idle").props.mt, 6);
