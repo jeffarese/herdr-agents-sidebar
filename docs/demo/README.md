@@ -7,7 +7,7 @@ home, its own herdr-cores and every mod installed from its repository. Its sessi
 pull requests and servers are made up (Sam, at Acme); nothing of anyone's own is in them. The
 kit's `README.md` says how the stage works and `BRIEF.md` what it shows.
 
-The stage is shot without the VPN switch (`SHOWCASE_TFVPN=0`), as every public mod's pictures are.
+The stage is shot without the VPN switch (`SHOWCASE_VPN=0`), as every public mod's pictures are.
 
 ## The sidebar's scene: `showcase.sh`
 
@@ -53,7 +53,7 @@ heights, so `showcase-shots.sh` measures both before it shoots, on the last fram
 sh docs/demo/showcase-shots.sh
 ```
 
-It builds a stage with this scene (`SHOWCASE_TFVPN=0`, `SHOWCASE_HOOK=docs/demo/showcase.sh`),
+It builds a stage with this scene (`SHOWCASE_VPN=0`, `SHOWCASE_HOOK=docs/demo/showcase.sh`),
 takes both pictures with the kit's `shoot.sh`, writes them over `preview.png` and
 `docs/media/sidebar.png`, and takes the stage down, also when a step fails. A picture over
 2.5 MB is reduced to 256 colors. `SHOWCASE_KIT` points at another copy of the kit;
@@ -70,7 +70,7 @@ To work on the scene by hand, build a stage and leave it up:
 
 ```sh
 kit=~/workspace/herdr/herdr-showcase
-w=$(SHOWCASE_TFVPN=0 SHOWCASE_HOOK=$PWD/docs/demo/showcase.sh sh $kit/stage.sh)
+w=$(SHOWCASE_VPN=0 SHOWCASE_HOOK=$PWD/docs/demo/showcase.sh sh $kit/stage.sh)
 (. "$w/env.sh" && herdr-app do space.select --index 2)   # every command with the stage's env
 sh $kit/shoot.sh "$w" /tmp/try.png
 sh $kit/stage.sh --down "$w"

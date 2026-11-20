@@ -2,7 +2,7 @@
 # The Sessions sidebar's scene for its README pictures, on a stage of the showcase kit
 # (~/workspace/herdr/herdr-showcase). The kit's scene.sh runs it last, with the stage's folder:
 #
-#   w=$(SHOWCASE_TFVPN=0 SHOWCASE_HOOK=$PWD/docs/demo/showcase.sh sh ~/workspace/herdr/herdr-showcase/stage.sh)
+#   w=$(SHOWCASE_VPN=0 SHOWCASE_HOOK=$PWD/docs/demo/showcase.sh sh ~/workspace/herdr/herdr-showcase/stage.sh)
 #
 # From the default scene (shop's Claude Code focused, two toasts) it adds what the sidebar can
 # show and the cast doesn't:

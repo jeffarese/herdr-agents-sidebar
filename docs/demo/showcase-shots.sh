@@ -25,7 +25,7 @@ trap down EXIT
 trap 'exit 130' INT TERM HUP
 
 # Public README: no VPN switch.
-w=$(SHOWCASE_TFVPN=0 SHOWCASE_HOOK="$here/showcase.sh" sh "$kit/stage.sh")
+w=$(SHOWCASE_VPN=0 SHOWCASE_HOOK="$here/showcase.sh" sh "$kit/stage.sh")
 [ -f "$w/env.sh" ] || { echo "showcase-shots: no stage" >&2; exit 1; }
 
 # The sidebar's width follows the sidebar.width setting and its length the mod's row heights, so
