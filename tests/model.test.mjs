@@ -15,6 +15,15 @@ test("local and remote IDs stay distinct even when the terminal numbers match", 
   ]);
 });
 
+test("a terminal its mod marked herdr.hidden stays out, also when Herdr counts it as an agent", () => {
+  const rows = build(world({
+    agents: [{ address: "t2", status: "idle", program }],
+    terminals: [terminal("t1"), terminal("t2", "idle", { labels: { "herdr.hidden": "true" } }),
+      terminal("t3", "idle", { labels: { "herdr.hidden": "false" } })],
+  }));
+  assert.deepEqual(rows.map(r => r.address).sort(), ["t1", "t3"]);
+});
+
 test("live agents, shells and other programs are listed once; finished and temporary hosts stay out", () => {
   const rows = build(world({
     agents: [{ address: "t1", status: "idle", program, pane: "p1" }],

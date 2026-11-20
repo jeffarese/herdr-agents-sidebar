@@ -25,6 +25,8 @@ export const BACKGROUND = {
   goal: "Goal active",
 };
 
+const hiddenLabel = terminal => ["true", "1"].includes(terminal?.labels?.["herdr.hidden"]);
+
 export function build({ agents = [], terminals = [], panes = [], spaces = [], machines = [], focused = null, work = new Map(), now = Date.now() } = {}) {
   const hosts = new Map(machines.map(m => [m.name ?? null, m]));
   const placed = new Map(panes.filter(p => p.terminal).map(p => [p.terminal, p]));
@@ -40,6 +42,9 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
     const a = listed.get(address);
     const terminal = raw.get(address);
     if (terminal && terminal.state !== "live") continue;
+    // A mod that runs a program for itself and shows it itself (a VPN client behind a switch)
+    // marks its terminal `herdr.hidden=true`: it is nobody's session.
+    if (hiddenLabel(terminal)) continue;
     const machine = machineOf(address);
     // The app excludes temporary machines from machines(). Do not leak their agents in.
     if (machine !== null && !hosts.has(machine)) continue;
