@@ -1,3 +1,4 @@
+import { sidebarButton } from "./sidebar-rail.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder, readTextFile, home, window } from "herdr";
@@ -731,12 +732,6 @@ export default class AgentSidebar extends View {
     return isAway(group) ? this.revealed.has(group.key) : this.isOpen(group.key);
   }
 
-  // Back from the rail to the width Herdr's own sidebar toggle remembered.
-  expand() {
-    setShared("sidebar.collapsed", false);
-    run("layout.resize", { id: "sidebar", px: Math.max(240, Number(this.x.shared("sidebar.width")) || WIDE) });
-  }
-
   // Settings and Add machine live here, so the sidebar needs no footer.
   extras(t, compact) {
     const add = h_flex().id("add-machine").h(26).flex_none().rounded(6).items_center().gap(8)
@@ -1205,7 +1200,7 @@ export default class AgentSidebar extends View {
       .role("button").accessibility_label(label).cursor_pointer()
       .tooltip(`${group.remote ? "Remote host" : "Local machine"}: ${group.label}${KIND_ICON[kind] ? ` · ${kind}` : ""}${state ? ` · ${state}` : ""}${busy ? `\n${busy}` : ""}`)
       .on_click((_e, cx) => this.toggle(group.key, cx));
-    if (compact) return root.h(30).px(6).gap(4).justify_center().when(!first, el => el.mt(4).border_t(1).border_color(t.border))
+    if (compact) return root.flex_col().py(3).gap(2).justify_center().when(!first, el => el.mt(4).border_t(1).border_color(t.border))
       .child(glyph(icon, 14).text_color(color)).child(add);
     const summary = open ? [] : this.summary(t, group);
     // The figures take the room the name leaves, and go when there is too little (the tooltip
@@ -1402,9 +1397,7 @@ export default class AgentSidebar extends View {
     let started = false;
     for (const change of [...this.fresh.values(), ...this.moves.values()]) if (change.step === 0) { change.step = 1; started = true; }
     if (started) this.pulse?.();
-    const iconButton = (id, icon, tip, action) => div().id(id).size(26).flex_none().rounded(6).flex().items_center().justify_center()
-      .role("button").accessibility_label(tip)
-      .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click(action).child(glyph(icon, 15));
+    const fold = sidebarButton("agent-sidebar", this.width, { expandId: "expand-agents" });
     return v_flex().id("agent-sidebar").size_full().min_h(0).bg(t.chrome).text_color(t.foreground)
       .track_focus(this.handle)
       .on_size_change((size, cx) => {
@@ -1446,10 +1439,10 @@ export default class AgentSidebar extends View {
           .when(this.single && this.bySpace, el => el.child(this.newSpaceButton(t, local, 26)))
           .when(this.single || this.byProject, el => el.child(this.newButton(t, local, 26)))
           .when(this.cfg.organize, el => el.child(this.organizeButton(t)))
-          .child(this.settingsButton(t))))
-      .when(compact, el => el.child(h_flex().h(34).flex_none().justify_center().items_center()
-        .child(iconButton("expand-agents", "panel-left", "Expand sessions", () => this.expand()))))
-      .child(v_flex().id("host-agent-list").flex_1().min_h(0).px(6).pt(compact ? 0 : 2).pb(12).overflow_y_scrollbar().track_scroll(this.scroll)
+          .child(this.settingsButton(t))
+          .when(fold, el => el.child(fold))))
+      .when(compact && fold, el => el.child(h_flex().h(32).flex_none().justify_center().items_center().child(fold)))
+      .child(v_flex().id("host-agent-list").flex_1().min_h(0).px(compact ? 2 : 6).pt(compact ? 0 : 2).pb(12).overflow_y_scrollbar().track_scroll(this.scroll)
         .role("list_box").accessibility_label(`Sessions grouped by ${this.single || this.byProject ? "" : "machine, then by "}${this.bySpace ? "space" : this.byProject ? "project" : "status"}`)
         .children(children));
   }

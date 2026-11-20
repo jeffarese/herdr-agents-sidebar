@@ -22,6 +22,7 @@ function setup(initial = {}, saved = {}) {
   let order;
   let scrollTo;
   const state = {
+    layout: { type: "row", children: [{ id: "sidebar", type: "block", content: { mod: "agent-sidebar" } }, { content: { tab: "active" } }] },
     machines: [{ name: null, layout: "ready" }, { name: "work", layout: "ready" }],
     agents: [], spaces: [], panes: [], focused: { terminal: "t1" },
     terminals: [
@@ -62,7 +63,7 @@ function setup(initial = {}, saved = {}) {
     ...Object.fromEntries(Object.keys(state).map(k => [k, () => state[k]])),
     focused: () => state.focused, theme: () => new Proxy({}, { get: (_, key) => typeof key === "string" ? `#${key}` : undefined }), // each color names its key settings: () => ({ zoom: 1 }),
     run: (name, args) => commands.push({ name, args }), setAgentOrder: addresses => { order = addresses; }, nextCommand: () => new Promise(() => {}),
-    openOverlay: spec => overlays.push(spec), closeOverlay() {}, props: () => ({ ...initial, overlay: "popup" }), knownAgents: async () => agentList,
+    openOverlay: spec => overlays.push(spec), closeOverlay() {}, props: () => initial.launcher || initial.settings ? { ...initial, overlay: "popup" } : initial, knownAgents: async () => agentList,
     home: () => "/Users/me", pickFolder: async () => picked, window: () => ({ platform: "macos" }),
     localStorage: storage, shared: key => sharedState[key], setShared: (key, value) => { sharedState[key] = value; },
     updates: () => ({ app: { ready: null } }),
@@ -75,6 +76,10 @@ function setup(initial = {}, saved = {}) {
   Object.assign(imports, new Function(...Object.keys(imports), `${launcherSource}\nreturn { initLauncher, renderLauncher, LAUNCHER };`)(...Object.values(imports)));
   const settingsSource = readFileSync(new URL("../mods/agent-sidebar/settings.js", import.meta.url), "utf8").replace(/^import [\s\S]*?;$/gm, "").replace(/export (function|const)/g, "$1");
   Object.assign(imports, new Function(...Object.keys(imports), `${settingsSource}\nreturn { initSettings, renderSettings, SETTINGS };`)(...Object.values(imports)));
+  const railSource = readFileSync(new URL("../mods/agent-sidebar/sidebar-rail.js", import.meta.url), "utf8")
+    .replace(/^import .*;$/gm, "").replaceAll("export function ", "function ");
+  const railImports = { ...imports, placement: () => null };
+  imports.sidebarButton = new Function(...Object.keys(railImports), railSource + "\nreturn sidebarButton;")(...Object.values(railImports));
   const source = readFileSync(new URL("../mods/agent-sidebar/main.js", import.meta.url), "utf8").replace(/^import [\s\S]*?;$/gm, "").replace("export default class", "return class");
   const View = new Function(...Object.keys(imports), source)(...Object.values(imports));
   delete globalThis.sessionLauncherKeys; // each test is a fresh app: its keymap is empty
