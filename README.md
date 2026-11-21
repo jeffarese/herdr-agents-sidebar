@@ -74,6 +74,7 @@ installer. Background work, sub-agents, and each session's model and effort are 
 | Start a shell or an agent on a machine | Click the machine's **+**, pick a folder, then the shell or agent (below). |
 | Start another session where one works | Hover its row and click its **+**: the launcher opens with that folder picked. |
 | Close a session | Hover its row and click **✕**: its pane closes, as ⌘W does in it. One that is working, needs you, has background work or runs a program asks first. |
+| See every agent as a card, with its sub-agents | With the [Agent grid](https://github.com/jeffarese/herdr-agent-grid-mod) installed, the title bar gets a grid button (its tooltip names the key, ⌘G as it ships): every agent on every machine as a card, with what it is doing, what it last said and its sub-agents. The button shows only while that mod is installed. |
 | See everything about a session | Hover it: program, project, machine, status and for how long, its background work, its address and folder. |
 
 ### Starting a session in a folder

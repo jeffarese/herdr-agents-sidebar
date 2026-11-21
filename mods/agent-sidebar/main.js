@@ -1,7 +1,7 @@
 import { sidebarButton } from "./sidebar-rail.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder, readTextFile, home, window } from "herdr";
+import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder, readTextFile, home, window, appHome, keys } from "herdr";
 import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, latestCodex, organizeAnswer, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving, statFigures, statsText } from "./model.js";
 import { PROBE, PROBE_MS, KIND, CHANGES, PULLS, STATS, STATS_MS, STATS_STALE_MS, parseChanges, parsePulls, machineKind, parseProbe, parseStats, snapshotStats, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
@@ -10,6 +10,14 @@ import { demo } from "./demo.js";
 
 const ART = "mods/agent-sidebar/";
 const glyph = (name, size = 14) => svg(`${ART}${name}.svg`).size(size).flex_none();
+// "cmd-g" as it is pressed: "⌘G" on a Mac, "Ctrl+G" elsewhere.
+function keyLabel(stroke, mac) {
+  const names = mac ? { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘" } : { ctrl: "Ctrl", alt: "Alt", shift: "Shift", cmd: "Super" };
+  const parts = stroke.trim().split(/\s+/)[0].split("-");
+  const key = parts.pop() || "-";
+  const held = new Set(parts.map(m => ({ secondary: mac ? "cmd" : "ctrl", super: "cmd", control: "ctrl", option: "alt" })[m] ?? m));
+  return [...Object.keys(names).filter(m => held.has(m)).map(m => names[m]), key.length === 1 ? key.toUpperCase() : key].join(mac ? "" : "+");
+}
 // Beside a remote machine's name: it is reached through herdr-core, elsewhere.
 const remoteMark = (color, key) => div().id(`remote-${key}`).flex_none().flex().items_center().tooltip("Remote: reached through herdr-core")
   .child(glyph("globe", 12).text_color(color));
@@ -186,8 +194,15 @@ export default class AgentSidebar extends View {
         cx.notify();
       }
     });
-    // Ages ("4m") are data, not animation: once every 30 s is as often as they change.
-    cx.timer.every(30000, cx => cx.notify());
+    // Ages ("4m") are data, not animation: once every 30 s is as often as they change. The
+    // agent grid (a mod of its own) gets a button in the header once it is installed.
+    this.grid = false;
+    const lookForGrid = cx => cx.spawn(async cx => {
+      const found = Boolean(await readTextFile(`${appHome()}/mods/agent-grid/mod.json`).catch(() => null));
+      if (found !== this.grid) { this.grid = found; cx.notify(); }
+    });
+    lookForGrid(cx);
+    cx.timer.every(30000, cx => { lookForGrid(cx); cx.notify(); });
     // Background work Herdr's status can't see (background.js), asked of each machine every
     // PROBE_MS, and again within a second of one of its agents changing status, which is
     // when such work starts or ends. Machines are asked separately: a slow one holds up none.
@@ -747,6 +762,17 @@ export default class AgentSidebar extends View {
   // A window over the app, from the gear or a key (bind one to agent-sidebar.settings).
   openSettings() {
     openOverlay({ mod: "agent-sidebar", kind: "dialog", width: SETTINGS.width, height: SETTINGS.height, props: { settings: true } });
+  }
+
+  // Opens the agent grid (herdr-agent-grid-mod): every agent as a card, over the window.
+  gridButton(t) {
+    const bound = keys().find(k => k.section === "global" && k.action === "mod.open:agent-grid")?.keys;
+    const tip = `All agents as cards${bound ? ` (${keyLabel(bound, window()?.platform === "macos")})` : ""}`;
+    return div().id("agent-grid").size(26).flex_none().rounded(6).flex().items_center().justify_center()
+      .role("button").accessibility_label(tip)
+      .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(tip).on_click(() => run("mod.open", { name: "agent-grid" }))
+      .child(glyph("grid", 15));
   }
 
   // The sidebar's own settings (settings.js), in a window. Herdr's are a click further, inside
@@ -1449,6 +1475,7 @@ export default class AgentSidebar extends View {
           .when(this.single && this.bySpace, el => el.child(this.newSpaceButton(t, local, 26)))
           .when(this.single || this.byProject, el => el.child(this.newButton(t, local, 26)))
           .when(this.cfg.organize, el => el.child(this.organizeButton(t)))
+          .when(this.grid, el => el.child(this.gridButton(t)))
           .child(this.settingsButton(t))
           .when(fold, el => el.child(fold))))
       .when(compact && fold, el => el.child(h_flex().h(32).flex_none().justify_center().items_center().child(fold)))
