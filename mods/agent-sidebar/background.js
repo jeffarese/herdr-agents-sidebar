@@ -102,9 +102,9 @@ procs=$(ps -A -ww -o pid= -o ppid= -o etime= -o args= 2>/dev/null | awk -v roots
   { pid[NR] = $1; up[NR] = $2; line[NR] = $0 }
   END {
     if (!NR) exit 1
-    for (round = 0; round < 3; round++)
+    for (round = 0; round < 4; round++)
       for (i = 1; i <= NR; i++)
-        if (!(pid[i] in depth) && (up[i] in depth) && depth[up[i]] < 3) depth[pid[i]] = depth[up[i]] + 1
+        if (!(pid[i] in depth) && (up[i] in depth) && depth[up[i]] < 4) depth[pid[i]] = depth[up[i]] + 1
     for (i = 1; i <= NR; i++) {
       if (!(pid[i] in depth)) continue
       print "P " line[i]
@@ -580,30 +580,78 @@ export function flagsOf(args) {
   return { model: flag(args, "model"), effort: flag(args, "effort")?.toLowerCase() ?? null };
 }
 
-// address → { at, session, goal, model, effort, shells, subagents } for the terminals probed on one
+// A Codex run an agent started through a shell ("codex exec -m gpt-6.2-astra … -o out/review.md -"),
+// or null. ps drops the quotes, so an inline prompt can't be told from other words: the title is
+// the file it writes its answer to, else what it was asked to do.
+// Options Codex takes before its subcommand that carry a value ("codex -m X exec").
+const CODEX_VALUE = new Set(["-m", "--model", "-c", "--config", "-p", "--profile", "-C", "--cd", "-s", "--sandbox", "-a", "--ask-for-approval", "-i", "--image"]);
+export function codexRun(args) {
+  const all = (args ?? "").trim().split(/\s+/);
+  if (!/^(?:\S*\/)?codex$/.test(all[0] ?? "")) return null;
+  let at = 1;
+  while (at < all.length && all[at].startsWith("-")) at += CODEX_VALUE.has(all[at]) ? 2 : 1;
+  const command = all[at];
+  if (!["exec", "e", "review"].includes(command)) return null;
+  const words = [...all.slice(1, at), ...all.slice(at + 1)];
+  const after = (...names) => {
+    for (let i = 0; i < words.length; i++) {
+      if (names.includes(words[i])) return words[i + 1] ?? null;
+      const eq = names.find(name => name.startsWith("--") && words[i].startsWith(`${name}=`));
+      if (eq) return words[i].slice(eq.length + 1);
+    }
+    return null;
+  };
+  const set = key => words.map((w, i) => words[i - 1] === "-c" || words[i - 1] === "--config" ? w : null)
+    .find(w => w?.startsWith(`${key}=`))?.slice(key.length + 1).replace(/^["']|["']$/g, "") ?? null;
+  const out = after("-o", "--output-last-message");
+  const name = out?.split("/").pop().replace(/\.[^.]*$/, "").replace(/[-_]+/g, " ").trim();
+  const review = command === "review";
+  return {
+    title: name ? `Codex ${review ? "review" : "run"}: ${name}` : review ? "Codex review" : "Codex run",
+    model: (after("-m", "--model") ?? set("model"))?.slice(0, 40) ?? null,
+    effort: set("model_reasoning_effort")?.toLowerCase().slice(0, 12) ?? null,
+  };
+}
+
+// address → { at, session, goal, model, effort, shells, subagents, codex } for the terminals probed on one
 // machine. targets: [{ address, pid }] with pid the terminal's foreground process: Claude
 // Code itself, or a wrapper that started it. The nearest session under it is the agent's.
 export function workOf(targets, probe) {
   const roots = new Map(targets.map(target => [String(target.pid), target.address]));
   const place = pid => {
-    for (let p = pid, depth = 0; p && depth <= 3; p = probe.procs.get(p)?.parent, depth++) {
+    for (let p = pid, depth = 0; p && depth <= 4; p = probe.procs.get(p)?.parent, depth++) {
       if (roots.has(p)) return { root: p, depth };
     }
     return null;
+  };
+  const underShell = (pid, depth) => {
+    for (let p = probe.procs.get(pid)?.parent, d = depth - 1; p && d > 0; p = probe.procs.get(p)?.parent, d--) {
+      if (SNAPSHOT.test(probe.procs.get(p)?.args ?? "")) return true;
+    }
+    return false;
+  };
+  const underCodex = (pid, depth) => {
+    for (let p = probe.procs.get(pid)?.parent, d = depth - 1; p && d > 0; p = probe.procs.get(p)?.parent, d--) {
+      if (codexRun(probe.procs.get(p)?.args)) return true;
+    }
+    return false;
   };
   const found = new Map();
   for (const [pid, proc] of probe.procs) {
     const where = place(pid);
     if (!where) continue;
-    const entry = found.get(where.root) ?? { pid: null, depth: Infinity, shells: [], flags: null, flagsDepth: Infinity };
+    const entry = found.get(where.root) ?? { pid: null, depth: Infinity, shells: [], codex: [], flags: null, flagsDepth: Infinity };
     found.set(where.root, entry);
     const flags = where.depth < entry.flagsDepth ? flagsOf(proc.args) : null;
     if (flags) Object.assign(entry, { flags, flagsDepth: where.depth });
     if ((probe.sessions.has(pid) || probe.logs.has(pid)) && where.depth < entry.depth) Object.assign(entry, { pid, depth: where.depth });
-    // A snapshot shell under another one (below the agent) is that command's own work.
-    if (where.depth > 0 && SNAPSHOT.test(proc.args) && !(where.depth > 1 && SNAPSHOT.test(probe.procs.get(proc.parent)?.args ?? ""))) {
+    // A snapshot shell anywhere under another one (below the agent) is that command's own work.
+    if (where.depth > 0 && SNAPSHOT.test(proc.args) && !underShell(pid, where.depth)) {
       entry.shells.push({ text: shellCommand(proc.args), started: proc.started });
     }
+    // Only one the agent started through its shell, and not one another Codex run started.
+    const run = where.depth > 1 && underShell(pid, where.depth) && !underCodex(pid, where.depth) ? codexRun(proc.args) : null;
+    if (run) entry.codex.push({ id: `codex-${pid}`, ...run, started: proc.started });
   }
   const out = new Map();
   for (const [root, entry] of found) {
@@ -625,6 +673,7 @@ export function workOf(targets, probe) {
       id: id ?? null,
       shells: entry.shells.sort((a, b) => a.started - b.started),
       subagents: (id && probe.subagents.get(id)) ?? [],
+      codex: entry.codex.sort((a, b) => a.started - b.started),
     });
   }
   return out;
@@ -646,5 +695,5 @@ export function probeTargets(rows) {
 export function signature(work) {
   return JSON.stringify([...work].sort(([a], [b]) => a.localeCompare(b)).map(([address, info]) =>
     [address, info.session?.status ?? null, info.goal?.condition ?? null, info.goal?.check ?? null, info.model ?? null, info.effort ?? null, info.context ?? null, info.activity?.tool ?? null, info.activity?.detail ?? null,
-      info.shells.map(shell => shell.text), info.subagents.map(sub => [sub.id, sub.description])]));
+      info.shells.map(shell => shell.text), info.subagents.map(sub => [sub.id, sub.description]), (info.codex ?? []).map(run => run.id)]));
 }

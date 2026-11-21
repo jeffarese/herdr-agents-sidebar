@@ -268,6 +268,29 @@ test("Claude Code's sub-agents are rows inside their session, counted as part of
   assert.deepEqual(counts(rows), { all: 1, blocked: 0, done: 0, working: 1, idle: 0, unknown: 0 });
 });
 
+test("Codex runs a session started show as its sub-agents, with Codex's icon", () => {
+  const now = Date.now();
+  const codex = [{ id: "codex-903", title: "Codex run: review", model: "gpt-6.2-astra", effort: "high", started: now - 5000 }];
+  const work = new Map([["t1", { at: now, session: { status: "shell" }, goal: null, shells: [], subagents: [], codex }]]);
+  const rows = build(world({ terminals: [terminal("t1", "done")], work, now }));
+  const run = rows.find(r => r.inner);
+  assert.deepEqual([run.address, run.parent, run.title, run.program.key, run.program.icon, run.model, run.effort],
+    ["t1#codex-903", "t1", "Codex run: review", "codex", "icons/codex.svg", "gpt-6.2-astra", "high"]);
+  assert.equal(rows.find(r => r.address === "t1").status, "working");
+});
+
+test("a line from further up runs on past a sub-agent's own sub-agents to its next sibling", () => {
+  const rows = build(world({ terminals: [
+    terminal("p", "working"),
+    terminal("k1", "working", { parent: "p" }),
+    terminal("g1", "working", { parent: "k1" }),
+    terminal("k2", "working", { parent: "p" }),
+  ] }));
+  const working = sectionize(rows.filter(r => !r.machine)).find(s => s.id === "working");
+  assert.deepEqual(working.entries.map(e => [e.row.address, e.depth, e.last, e.rails]),
+    [["p", 0, false, []], ["k1", 1, false, []], ["g1", 2, true, [1]], ["k2", 1, true, []]]);
+});
+
 test("inside a status, sessions in the same folder sit together where the first of them would be", () => {
   const rows = build(world({ terminals: [
     terminal("a1", "idle", { cwd: "/code/api/", status_ms: 400 }),

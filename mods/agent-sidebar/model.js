@@ -103,17 +103,31 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
 // Claude Code's own sub-agents run inside its process, not in terminals: each running one
 // becomes a row under its session. It can't be pinned or opened by itself; opening it opens
 // the session. Its address is the session's plus "#" and the sub-agent's id.
+// Herdr's own Codex entry when a session shows it, for its icon; else the same one by name.
+const CODEX_PROGRAM = { key: "codex", name: "Codex", icon: "icons/codex.svg", tint: false, tile: null, color: null, shell: false, agent: true };
 function addSubagents(rows, fresh) {
+  const codex = rows.find(row => row.program?.key === "codex")?.program ?? CODEX_PROGRAM;
   for (const row of rows.slice()) {
     if (row.kind !== "agent") continue;
     for (const sub of fresh(row.address)?.subagents ?? []) {
       rows.push({
         address: `${row.address}#${sub.id}`, machine: row.machine, kind: "agent", inner: true,
         title: sub.description || sub.type || "Sub-agent", status: "working", reported: "working",
-        program: null, space: sub.type, spaceId: row.spaceId, spaceOrder: row.spaceOrder, pane: row.pane, terminal: row.address, parent: row.address,
+        program: row.program, space: sub.type, spaceId: row.spaceId, spaceOrder: row.spaceOrder, pane: row.pane, terminal: row.address, parent: row.address,
         cwd: row.cwd, branch: row.branch, pinned: false, focused: false, changed: sub.started, since: sub.started, seq: 0,
         available: row.available, pid: null, inBackground: sub.background,
         background: [], goal: null, shells: [], helpers: [], model: null, effort: null, context: null, activity: null, session: null,
+      });
+    }
+    // Codex runs it started through a shell (an adversarial review, say) count as its sub-agents.
+    for (const run of fresh(row.address)?.codex ?? []) {
+      rows.push({
+        address: `${row.address}#${run.id}`, machine: row.machine, kind: "agent", inner: true,
+        title: run.title, status: "working", reported: "working",
+        program: codex, space: "Codex", spaceId: row.spaceId, spaceOrder: row.spaceOrder, pane: row.pane, terminal: row.address, parent: row.address,
+        cwd: row.cwd, branch: row.branch, pinned: false, focused: false, changed: run.started, since: run.started, seq: 0,
+        available: row.available, pid: null, inBackground: false,
+        background: [], goal: null, shells: [], helpers: [], model: run.model, effort: run.effort, context: null, activity: null, session: null,
       });
     }
   }
@@ -240,10 +254,14 @@ export function sectionize(rows, by = "status", spaces = []) {
     kids.get(row.parent).push(row);
   }
   const seen = new Set();
-  const tree = (row, depth) => {
+  // `last`: the last of its parent's sub-agents, where the line that joins them ends.
+  // `rails`: the depths of the lines from further up that run on past it, to a later sibling.
+  const tree = (row, depth, last = false, rails = []) => {
     if (seen.has(row.address)) return [];
     seen.add(row.address);
-    return [{ row, depth }, ...(kids.get(row.address) ?? []).flatMap(kid => tree(kid, depth + 1))];
+    const below = (kids.get(row.address) ?? []).filter(kid => !seen.has(kid.address));
+    const on = depth > 0 && !last ? [...rails, depth] : rails;
+    return [{ row, depth, last, rails }, ...below.flatMap((kid, i) => tree(kid, depth + 1, i === below.length - 1, on))];
   };
   // Each section holds trees (a session and its sub-agents), in priority order.
   const held = new Map(by === "space" ? spaces.map((space, i) => [`space:${space.id}`, { id: `space:${space.id}`, label: space.name || "Space", status: null, space: space.id, order: i - spaces.length, trees: [] }]) : []);

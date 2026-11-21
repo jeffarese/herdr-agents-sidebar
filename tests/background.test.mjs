@@ -4,7 +4,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROBE, KIND, STATS, machineKind, parseStats, snapshotStats, flagsOf, activityOf, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
+import { PROBE, KIND, STATS, machineKind, parseStats, snapshotStats, flagsOf, codexRun, activityOf, elapsed, shellCommand, goalOf, parseProbe, probeArgs, workOf, probeTargets, signature } from "../mods/agent-sidebar/background.js";
 
 // As ps prints a background command Claude Code started (captured from Claude Code 2.1.323).
 const snapshot = command => `/bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1794566139050-qx5w1i.sh 2>/dev/null || true && \\builtin setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval '${command.replaceAll("'", `'"'"'`)}' < /dev/null && pwd -P >| /tmp/claude-151a-cwd`;
@@ -108,7 +108,7 @@ test("a wrapper's Claude Code session is found, and only its background shells c
   assert.deepEqual(work.get("t1").session, { status: "busy" });
   assert.deepEqual(work.get("t1").shells, [{ text: "npm test", started: now - 240000 }, { text: "sleep 300", started: now - 30000 }]);
   assert.deepEqual(work.get("t1").subagents.map(sub => sub.id), ["a1"]);
-  assert.deepEqual(work.get("t2"), { at: now, session: null, goal: null, model: null, effort: null, context: null, activity: null, id: null, shells: [], subagents: [] });
+  assert.deepEqual(work.get("t2"), { at: now, session: null, goal: null, model: null, effort: null, context: null, activity: null, id: null, shells: [], subagents: [], codex: [] });
   assert.equal(work.has("t3"), false); // its process is gone
   // A reading's signature ignores times.
   assert.equal(signature(work), signature(workOf([{ address: "t1", pid: 900 }, { address: "t2", pid: 950 }], parseProbe("P 900 1 00:01 agp\nP 950 1 00:01 claude\nP 901 900 00:01 claude\n" +
@@ -357,4 +357,35 @@ test("a Linux machine is measured from /proc, a second apart", { skip: !existsSy
 test("this machine says how busy it is", { skip: !["darwin", "linux"].includes(process.platform) }, () => {
   const reading = parseStats(execFileSync("/bin/sh", ["-c", STATS], { encoding: "utf8" }));
   assert.ok(reading && reading.cpu !== null && reading.total > 0 && reading.used > 0 && reading.disk?.total > 0, JSON.stringify(reading));
+});
+
+test("a Codex run an agent started through a shell is found, with its model, effort and answer file", () => {
+  assert.equal(codexRun("codex --version"), null);
+  assert.equal(codexRun("node codex-mcp.js"), null);
+  assert.deepEqual(codexRun("/Users/me/.local/bin/codex exec -m gpt-6.2-astra -c model_reasoning_effort=high -s read-only -C /tmp/a -o /tmp/a/out/r2-write-side.md -"),
+    { title: "Codex run: r2 write side", model: "gpt-6.2-astra", effort: "high" });
+  assert.deepEqual(codexRun("codex review --base main"), { title: "Codex review", model: null, effort: null });
+  assert.deepEqual(codexRun("codex -m gpt-6.2-astra exec --output-last-message=/tmp/final.md -"), { title: "Codex run: final", model: "gpt-6.2-astra", effort: null });
+  assert.equal(codexRun("codex -m exec resume"), null); // "exec" is the model there
+  const now = Date.UTC(2026, 10, 21, 12);
+  const snapshot = cmd => `/bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval '${cmd}' < /dev/null`;
+  const probe = parseProbe([
+    "P 900 1 10:00 claude",
+    `P 902 900 03:00 ${snapshot("codex exec -m gpt-6.2-astra - < brief.md")}`,
+    "P 903 902 03:00 codex exec -m gpt-6.2-astra -",
+    "P 904 903 00:10 codex exec --help",              // something Codex ran itself
+    `P 910 900 01:00 ${snapshot("sh review.sh")}`,
+    "P 911 910 01:00 sh review.sh",
+    "P 912 911 01:00 /bin/sh -c x",
+    "P 913 912 00:59 codex review",                   // four levels down, through a script
+    "P 920 1 10:00 run-review",                       // a wrapper running Codex is no session's sub-agent
+    "P 921 920 05:00 codex exec -",
+    `P 914 913 00:30 ${snapshot("codex exec -")}`,  // a Codex run's own shell starting another
+    "P 915 914 00:30 codex exec -",
+    "",
+  ].join("\n"), now);
+  assert.deepEqual(workOf([{ address: "t2", pid: "920" }], probe).get("t2").codex, []);
+  const work = workOf([{ address: "t1", pid: "900" }], probe).get("t1");
+  assert.deepEqual(work.codex.map(run => [run.id, run.title, run.model, run.started]),
+    [["codex-903", "Codex run", "gpt-6.2-astra", now - 180000], ["codex-913", "Codex review", null, now - 59000]]);
 });

@@ -798,7 +798,7 @@ export default class AgentSidebar extends View {
     const host = this.single ? "" : row.machine == null ? "Local" : `Remote · ${row.machine}`;
     const kind = row.inner ? (row.inBackground ? "Sub-agent, in the background" : "Sub-agent")
       : row.kind === "shell" ? "Shell" : row.kind === "process" ? "Program" : "Agent";
-    const context = [...new Set([kind, row.space === row.title ? "" : row.space, row.program?.name].filter(Boolean))].join(" · ");
+    const context = [...new Set([kind, row.space === row.title ? "" : row.space, !row.inner && row.program?.name].filter(Boolean))].join(" · ");
     const word = !row.background.length ? WORDS[row.status]
       : row.background.some(reason => reason !== "goal") ? "Cooking in the background" : "Goal active";
     const state = !row.available ? "Unavailable" : row.kind === "agent" && row.since ? `${word} · ${duration(now - row.since)}` : word;
@@ -1046,7 +1046,17 @@ export default class AgentSidebar extends View {
       .on_mouse_up("left", (_e, cx) => this.release(cx, null, null, row))
       .when(this.moving?.addresses.includes(row.address) || this.pending.some(move => move.address === row.address), el => el.opacity(0.5))
       .when(Boolean(tint), el => el.child(tint))
-      .when(Boolean(row.parent), el => el.child(glyph("sub", 11).ml(-2).mr(-4).text_color(t.dim)))
+      // One line joins a session's sub-agents: down from under its icon, turning with a rounded
+      // corner toward the last one's icon.
+      .when(depth > 0, el => {
+        const high = expanded ? ROW.expanded : ROW.compact;
+        const at = d => indent - (depth - d) * 14 - (expanded ? 5 : 6);
+        const line = div().absolute().left(at(depth)).top(0);
+        for (const d of entry.rails ?? []) el = el.child(div().absolute().left(at(d)).top(0).w(1).h(high).bg(t.dim + "80"));
+        return el.child(entry.last
+          ? line.w(expanded ? 4 : 5).h(high / 2 + 0.5).border_l(1).border_b(1).rounded_bl(6).border_color(t.dim + "80")
+          : line.w(1).h(high).bg(t.dim + "80"));
+      })
       // Idle, its icon steps back with its title: the bright ones are the sessions that matter now.
       .child(this.program(t, row, expanded ? 18 : 16).when(quiet || !row.available, el => el.opacity(0.5)))
       .child(text)

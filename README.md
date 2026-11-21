@@ -165,7 +165,10 @@ and its mark says what it waits on:
   with an open goal gets a small flag beside its age.
 
 Claude Code's sub-agents run inside its process, so Herdr has no terminal for them. The sidebar
-lists each running one under its session, with its task and how long it has run. A click opens
+lists each running one under its session, with its task and how long it has run. A Codex run
+the session started through a shell (`codex exec` or `codex review`, an adversarial review, say)
+is listed the same way, with Codex's icon, its model and effort, and the name of the file it
+writes its answer to. A line joins a session's sub-agents. A click opens
 the session. They count as part of their session in the title's count and the headings.
 
 ## How background work is found
