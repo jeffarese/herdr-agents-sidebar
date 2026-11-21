@@ -279,6 +279,30 @@ test("sub-agents sit under their parent and lift it into their most urgent secti
   assert.deepEqual(find(root, "host-agent-list").nodes.map(n => n.props.id).slice(0, 5),
     ["host-local", "section-local:blocked", "agent-t1", "agent-t2", "agent-t3"]);
   assert.ok(find(root, "agent-t2").props.pl > find(root, "agent-t1").props.pl);
+  // Each sub-agent gets a branch from the vertical line to its icon; the last ends in a rounded corner.
+  const lines = node => node.nodes.filter(n => n?.props?.absolute !== undefined && n.props.left !== undefined).map(n => n.props);
+  assert.deepEqual(lines(find(root, "agent-t2")).map(({ left, top, w, h: high }) => ({ left, top, w, h: high })), [
+    { left: 16, top: 0, w: 1, h: 28 },
+    { left: 17, top: 13.5, w: 4, h: 1 },
+  ]);
+  assert.deepEqual(lines(find(root, "agent-t3")).map(({ left, top, w, h: high, rounded_bl }) => ({ left, top, w, h: high, rounded_bl })), [
+    { left: 16, top: 0, w: 5, h: 14.5, rounded_bl: 6 },
+  ]);
+  // Expanded rows and deeper sub-agents align with the larger icons and keep outer rails straight.
+  h.sharedState["agent-sidebar.density"] = "expanded";
+  h.state.terminals.push({ address: "t4", state: "live", status: "working", parent: "t2", program: { name: "Claude", agent: true }, title: "Grandchild" });
+  const expanded = h.view.render();
+  assert.deepEqual(lines(find(expanded, "agent-t2")).map(({ left, top, w, h: high }) => ({ left, top, w, h: high })), [
+    { left: 17, top: 0, w: 1, h: 40 },
+    { left: 18, top: 19.5, w: 3, h: 1 },
+  ]);
+  assert.deepEqual(lines(find(expanded, "agent-t4")).map(({ left, top, w, h: high, rounded_bl }) => ({ left, top, w, h: high, rounded_bl })), [
+    { left: 17, top: 0, w: 1, h: 40, rounded_bl: undefined },
+    { left: 31, top: 0, w: 4, h: 20.5, rounded_bl: 6 },
+  ]);
+  assert.deepEqual(lines(find(expanded, "agent-t3")).map(({ left, top, w, h: high, rounded_bl }) => ({ left, top, w, h: high, rounded_bl })), [
+    { left: 17, top: 0, w: 4, h: 20.5, rounded_bl: 6 },
+  ]);
 });
 
 test("hovering a row offers pin and unpin without opening the session", () => {

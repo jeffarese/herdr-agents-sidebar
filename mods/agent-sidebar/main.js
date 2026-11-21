@@ -1072,16 +1072,19 @@ export default class AgentSidebar extends View {
       .on_mouse_up("left", (_e, cx) => this.release(cx, null, null, row))
       .when(this.moving?.addresses.includes(row.address) || this.pending.some(move => move.address === row.address), el => el.opacity(0.5))
       .when(Boolean(tint), el => el.child(tint))
-      // One line joins a session's sub-agents: down from under its icon, turning with a rounded
-      // corner toward the last one's icon.
+      // One line joins a session's sub-agents: down from under its icon, with a branch to each
+      // one's icon and a rounded corner at the last.
       .when(depth > 0, el => {
         const high = expanded ? ROW.expanded : ROW.compact;
+        const arm = expanded ? 4 : 5;
+        const color = t.dim + "80";
         const at = d => indent - (depth - d) * 14 - (expanded ? 5 : 6);
-        const line = div().absolute().left(at(depth)).top(0);
-        for (const d of entry.rails ?? []) el = el.child(div().absolute().left(at(d)).top(0).w(1).h(high).bg(t.dim + "80"));
-        return el.child(entry.last
-          ? line.w(expanded ? 4 : 5).h(high / 2 + 0.5).border_l(1).border_b(1).rounded_bl(6).border_color(t.dim + "80")
-          : line.w(1).h(high).bg(t.dim + "80"));
+        const x = at(depth);
+        for (const d of entry.rails ?? []) el = el.child(div().absolute().left(at(d)).top(0).w(1).h(high).bg(color));
+        if (entry.last) return el.child(div().absolute().left(x).top(0).w(arm).h(high / 2 + 0.5).border_l(1).border_b(1).rounded_bl(6).border_color(color));
+        return el
+          .child(div().absolute().left(x).top(0).w(1).h(high).bg(color))
+          .child(div().absolute().left(x + 1).top(high / 2 - 0.5).w(arm - 1).h(1).bg(color));
       })
       // Idle, its icon steps back with its title: the bright ones are the sessions that matter now.
       .child(this.program(t, row, expanded ? 18 : 16).when(quiet || !row.available, el => el.opacity(0.5)))
