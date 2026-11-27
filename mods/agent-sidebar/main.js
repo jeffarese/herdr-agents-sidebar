@@ -2,7 +2,7 @@ import { sidebarButton } from "./sidebar-rail.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, machines, focused, theme, settings, run, hc, notify, setAgentOrder, nextCommand, openOverlay, props, shared, setShared, updates, exec, pickFolder, readTextFile, home, window, appHome, keys } from "herdr";
-import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, latestCodex, organizeAnswer, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving, statFigures, statsText } from "./model.js";
+import { build, groups, counts, WORDS, BACKGROUND, modelName, fitWhere, activityText, tokens, canMove, movable, moveArgs, canReply, canRename, renameAction, NAMES_KEY, stale, ended, remember, resumeAction, organizeBrief, organizePlan, previewOf, latestCodex, organizeAnswer, ORGANIZE_SYSTEM, ORGANIZE_SCHEMA, folderKey, DENSITY_KEY, GROUP_KEY, SETTINGS_KEY, settingsOf, STALE_SESSION_MS, openAction, closeAction, duration, backgroundLines, machineOf, shortPath, holdDone, dropLeaving, statFigures, statsText } from "./model.js";
 import { PROBE, PROBE_MS, KIND, CHANGES, PULLS, STATS, STATS_MS, STATS_STALE_MS, parseChanges, parsePulls, machineKind, parseProbe, parseStats, snapshotStats, probeArgs, probeTargets, workOf, signature } from "./background.js";
 import { initLauncher, renderLauncher, LAUNCHER } from "./launcher.js";
 import { initSettings, renderSettings, SETTINGS } from "./settings.js";
@@ -153,6 +153,10 @@ export default class AgentSidebar extends View {
     this.replying = null;
     this.reply = InputState.new({ placeholder: "Message, then Enter" });
     this.reply.on("submit", (_e, cx) => { this.send(); cx?.notify?.(); });
+    // The session being renamed, in the field under its row.
+    this.renaming = null;
+    this.renameInput = InputState.new({ placeholder: "Name (empty resets)" });
+    this.renameInput.on("submit", (_e, cx) => { this.commitRename(); cx?.notify?.(); });
     // address → what was last seen of each Claude Code session, to tell when one ended.
     this.known = new Map();
     this.closedOpen = Boolean(store.get("closedOpen", false));
@@ -408,7 +412,7 @@ export default class AgentSidebar extends View {
       if (key) ys.set(key, y);
       y += heights[i];
     });
-    const view = [this.expanded, this.bySpace, this.byProject, Boolean(this.moving), this.replying, this.plan === "asking" ? 1 : this.plan ? 2 : 0, this.width, this.single, compact].join("|");
+    const view = [this.expanded, this.bySpace, this.byProject, Boolean(this.moving), this.replying, this.renaming, this.plan === "asking" ? 1 : this.plan ? 2 : 0, this.width, this.single, compact].join("|");
     if (this.ys && this.view === view && !compact && this.cfg.animations) {
       for (const [key, now_] of ys) {
         const was = this.ys.get(key);
@@ -502,6 +506,52 @@ export default class AgentSidebar extends View {
       .bg(t.background).border(1).border_color(t.border).items_center()
       .child(glyph("reply", 12).text_color(t.muted))
       .child(Input.new(this.reply).accessibility_label(`Message to ${row.title}`).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground))
+      .child(div().flex_none().text_size(10).text_color(t.dim).child("Esc cancels"));
+  }
+
+  startRename(row) {
+    if (!canRename(row)) return;
+    this.drag = null;
+    if (this.moving?.dragged) this.moving = null;
+    if (this.replying) { this.replying = null; this.reply.set_value(""); }
+    const current = row.customName ?? row.title ?? "";
+    this.renaming = row.address;
+    this.renameInput.set_value(current);
+    this.renameInput.set_selected_range?.({ start: 0, end: current.length });
+    this.renameInput.focus();
+  }
+
+  // Renames the session through Herdr's pane.rename when it has a pane, or keeps the name in
+  // shared state when it runs without one. An empty name gives its automatic title back.
+  commitRename() {
+    const address = this.renaming;
+    const name = this.renameInput.value().trim();
+    this.renaming = null;
+    this.renameInput.set_value("");
+    const row = (this.rows ?? []).find(r => r.address === address);
+    if (!canRename(row)) return;
+    const action = renameAction(row, name);
+    const saved = this.x.shared(NAMES_KEY);
+    if (action) {
+      run(action.name, action.args);
+      if (saved && Object.hasOwn(saved, address)) {
+        const next = { ...saved };
+        delete next[address];
+        setShared(NAMES_KEY, next);
+      }
+      return;
+    }
+    const next = { ...(saved ?? {}) };
+    if (name) next[address] = name;
+    else delete next[address];
+    setShared(NAMES_KEY, next);
+  }
+
+  renameField(t, row, indent) {
+    return h_flex().id(`rename-${row.address}`).h(28).flex_none().ml(indent).mr(4).mb(2).pl(8).pr(6).gap(6).rounded(6)
+      .bg(t.background).border(1).border_color(t.border).items_center()
+      .child(glyph("pencil", 12).text_color(t.muted))
+      .child(Input.new(this.renameInput).accessibility_label(`Rename ${row.title}`).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground))
       .child(div().flex_none().text_size(10).text_color(t.dim).child("Esc cancels"));
   }
 
@@ -671,9 +721,12 @@ export default class AgentSidebar extends View {
     this.drag = this.moving ? null : { ...drag, over: drag.home, moved: false };
   }
 
-  dragOver(key, cx) {
+  dragOver(key, cx, e = null) {
     const drag = this.drag;
-    if (!drag || drag.over === key) return;
+    if (!drag) return;
+    // Released outside the list: not a drag anymore.
+    if (e && e.pressed_button !== "left") { this.release(cx); return; }
+    if (drag.over === key) return;
     drag.over = key;
     drag.moved = true;
     if (drag.row && !this.moving) this.startMove([drag.row], drag.row.title, drag.row.spaceId, true);
@@ -985,6 +1038,7 @@ export default class AgentSidebar extends View {
       .tooltip("Send it a message")
       .on_click((_e, cx) => {
         cx.stop_propagation();
+        if (this.renaming) { this.renaming = null; this.renameInput.set_value(""); }
         this.replying = row.address;
         this.reply.set_value("");
         this.reply.focus();
@@ -992,6 +1046,18 @@ export default class AgentSidebar extends View {
         cx.notify();
       })
       .child(glyph("reply", 12));
+    // Rename the session, typed in a field that opens under the row.
+    const rename = div().id(`rename-to-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
+      .role("button").accessibility_label(`Rename ${row.title}`)
+      .cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Rename")
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.startRename(row);
+        this.hovered = null;
+        cx.notify();
+      })
+      .child(glyph("pencil", 12));
     // To another space: every space it can go to then takes the click.
     const others = movable(row) && this.x.spaces().filter(space => (space.machine ?? null) === row.machine && space.id !== row.spaceId).length > 0;
     const move = div().id(`move-${row.address}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
@@ -1068,7 +1134,7 @@ export default class AgentSidebar extends View {
       })
       .when(leaves !== undefined, el => el.bg(t.accent + "22"))
       .when(movable(row) && !this.preview, el => el.on_mouse_down("left", () => this.press({ row, home: `row:${row.address}` })))
-      .on_mouse_move((_e, cx) => this.dragOver(`row:${row.address}`, cx))
+      .on_mouse_move((e, cx) => this.dragOver(`row:${row.address}`, cx, e))
       .on_mouse_up("left", (_e, cx) => this.release(cx, null, null, row))
       .when(this.moving?.addresses.includes(row.address) || this.pending.some(move => move.address === row.address), el => el.opacity(0.5))
       .when(Boolean(tint), el => el.child(tint))
@@ -1093,7 +1159,9 @@ export default class AgentSidebar extends View {
       .when(goal, el => el.child(div().id(`goal-${row.address}`).flex_none().tooltip(`Goal: ${row.goal.condition}`)
         .child(glyph("goal", 11).text_color(t.dim))))
       .when(pinning, el => el.child(h_flex().flex_none().gap(2).items_center()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .when(!armed && canReply(row), el => el.child(reply))
+        .when(!armed && canRename(row), el => el.child(rename))
         .when(!armed && others, el => el.child(move))
         .when(!armed && Boolean(row.cwd), el => el.child(here))
         .when(!armed, el => el.child(pin))
@@ -1151,6 +1219,7 @@ export default class AgentSidebar extends View {
     const act = (id, icon, tip, action) => div().id(`${id}-${key}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
       .role("button").accessibility_label(`${tip}: ${section.label}`).cursor_pointer().text_color(t.muted)
       .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { cx.stop_propagation(); this.hoveredSection = null; action(); cx.notify(); })
       .child(glyph(icon, 12));
     const rows = section.entries.map(entry => entry.row);
@@ -1177,9 +1246,10 @@ export default class AgentSidebar extends View {
       .when(Boolean(space) && !this.preview, el => el
         .on_mouse_down("right", () => this.spaceMenu(space))
         .on_mouse_down("left", () => this.press({ space, machine: group.name ?? null, home: `section:${key}` })))
-      .on_mouse_move((_e, cx) => this.dragOver(`section:${key}`, cx))
+      .on_mouse_move((e, cx) => this.dragOver(`section:${key}`, cx, e))
       .on_mouse_up("left", (_e, cx) => this.release(cx, group, section))
       .when(Boolean(dot), el => el.child(div().id(`color-${key}`).size(8).flex_none().rounded(4).bg(dot).cursor_pointer().tooltip("Change color")
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => { cx.stop_propagation(); if (!this.preview) this.recolor(space); cx.notify(); })))
       .when(byStatus, el => el.child(div().id(`status-${key}`).size(14).flex_none().flex().items_center().justify_center()
         .text_color(section.status ? t[section.status] : t.dim).child(this.sectionMark(t, section.id))))
@@ -1322,7 +1392,7 @@ export default class AgentSidebar extends View {
     const now = Date.now();
     const shownPanes = this.x.panes();
     const placed = new Set(shownPanes.filter(pane => pane.terminal).map(pane => pane.terminal));
-    const built = build({ agents: this.x.agents(), terminals: this.x.terminals(), panes: shownPanes, spaces: this.x.spaces(), machines: hosts, focused: this.x.focused(), work: this.work, now });
+    const built = build({ agents: this.x.agents(), terminals: this.x.terminals(), panes: shownPanes, spaces: this.x.spaces(), machines: hosts, focused: this.x.focused(), work: this.work, names: this.x.shared(NAMES_KEY) ?? {}, now });
     for (const address of this.parked) if (placed.has(address) || !built.some(row => row.address === address)) this.parked.delete(address);
     const staying = new Set([...this.pending.map(move => move.address), ...this.parked]);
     const all = holdDone(dropLeaving(built, this.leaving, this.placed, placed, now, staying), this.shown ?? new Map());
@@ -1343,6 +1413,7 @@ export default class AgentSidebar extends View {
     if (gone.length) setShared(CLOSED_KEY, gone.reduce((list, seen) => remember(list, seen, now), this.x.shared(CLOSED_KEY) ?? []));
     for (const row of all) if (row.kind === "agent" && !row.inner && row.available && row.session) this.known.set(row.address, { title: row.title, cwd: row.cwd, machine: row.machine, session: row.session });
     if (this.replying && !canReply(all.find(row => row.address === this.replying))) this.replying = null;
+    if (this.renaming && !canRename(all.find(row => row.address === this.renaming))) this.renaming = null;
     // What the settings leave out of the list is still there: a sub-agent still holds its session
     // in Working, and a shell is still found by its address.
     const listed = cfg.subagents && cfg.shells ? all : all.filter(row => (cfg.subagents || !row.inner) && (cfg.shells || row.kind === "agent"));
@@ -1381,6 +1452,7 @@ export default class AgentSidebar extends View {
       this.visible.push(row);
       push(node, `row:${row.address}`, rowHeight);
       if (this.replying === row.address && !compact) push(this.replyField(t, row, 30), `reply:${row.address}`, 30);
+      if (this.renaming === row.address && !compact) push(this.renameField(t, row, 30), `rename:${row.address}`, 30);
     };
     // While a space is being chosen: what is moving, and the way out.
     if (this.moving && !compact) push(h_flex().id("moving").h(26).flex_none().mx(2).mb(2).px(8).gap(6).rounded(6).bg(t.raised).items_center().text_size(11)
@@ -1439,6 +1511,7 @@ export default class AgentSidebar extends View {
     const fold = sidebarButton("agent-sidebar", this.width, { expandId: "expand-agents" });
     return v_flex().id("agent-sidebar").size_full().min_h(0).bg(t.chrome).text_color(t.foreground)
       .track_focus(this.handle)
+      .on_mouse_up("left", (_e, cx) => this.release(cx))
       .on_size_change((size, cx) => {
         const width = size.width / Number(settings().zoom ?? 1);
         if (this.width !== width) { this.width = width; cx.notify(); }
@@ -1447,17 +1520,22 @@ export default class AgentSidebar extends View {
         if (e.key === "escape") {
           // Out of a move; else back to the current session.
           this.selected = null;
-          if (this.replying) { this.replying = null; this.reply.set_value(""); }
+          if (this.renaming) { this.renaming = null; this.renameInput.set_value(""); }
+          else if (this.replying) { this.replying = null; this.reply.set_value(""); }
           else if (this.plan) this.dismissPlan();
           else if (this.moving) this.moving = null;
           else this.open(this.visible.find(r => r.focused));
-        } else if (this.replying) {
-          // Every other key is the message's.
+        } else if (this.replying || this.renaming) {
+          // Every other key is the field's.
           return;
         } else if (e.key === "enter") {
           const row = this.visible.find(r => r.address === this.selected);
           if (!row) return;
           this.open(row);
+        } else if (e.key === "f2") {
+          const row = this.visible.find(r => r.address === this.selected);
+          if (!canRename(row)) return;
+          this.startRename(row);
         } else if (e.key === "down" || e.key === "up") {
           if (!this.visible.length) return;
           const current = this.visible.findIndex(r => r.address === this.selected);

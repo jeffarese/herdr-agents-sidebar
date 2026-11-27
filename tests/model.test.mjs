@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, organizeBrief, organizePlan, latestCodex, organizeAnswer, ORGANIZE_SCHEMA, activityText, tokens, stale, ended, remember, resumeAction, canReply, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS , statFigures, statsText } from "../mods/agent-sidebar/model.js";
+import { build, groups, counts, modelName, fitWhere, canMove, moveArgs, organizeBrief, organizePlan, latestCodex, organizeAnswer, ORGANIZE_SCHEMA, activityText, tokens, stale, ended, remember, resumeAction, canReply, canRename, renameAction, openAction, newSessionAction, sectionize, duration, backgroundLines, shortPath, holdDone, dropLeaving, LEAVE_MS , statFigures, statsText } from "../mods/agent-sidebar/model.js";
 
 const program = { key: "claude", name: "Claude Code", agent: true };
 const terminal = (address, status = "idle", extra = {}) => ({ address, status, state: "live", program, title: "Fix login", ...extra });
@@ -437,4 +437,26 @@ test("a machine's figures are quiet until one runs high; memory goes by its pres
   assert.deepEqual(said({ cpu: 0.2, used: 1, total: 2, pressure: null, disk: { used: 1, total: 4 } }).map(f => f.split(" ")[0]), ["cpu", "memory", "disk"]);
   assert.equal(statsText(disk(875.2, 1858.1)), "Disk 875 GB of 1.8 TB (47%)");
   assert.equal(statsText(disk(3480, 3815)), "Disk 3.4 of 3.7 TB (91%)");
+});
+
+test("pane names and fallback names override automatic titles, and renameAction targets pane.rename", () => {
+  const rows = build(world({
+    agents: [{ address: "t1", title: "Auto task", pane: "p1", pane_name: "Billing refactor", status: "working", program }],
+    panes: [{ pane: "p1", terminal: "t1", title: "Auto task", name: "Billing refactor" }],
+    terminals: [terminal("t1", "working"), terminal("t2", "idle", { title: "Parked task" })],
+    names: { t1: "Ignored when paned", t2: "Custom parked" },
+  }));
+  const t1 = rows.find(r => r.address === "t1");
+  const t2 = rows.find(r => r.address === "t2");
+  assert.equal(t1.title, "Billing refactor");
+  assert.equal(t1.customName, "Billing refactor");
+  assert.equal(t2.title, "Custom parked");
+  assert.equal(t2.customName, "Custom parked");
+  assert.equal(canRename(t1), true);
+  assert.equal(canRename(t2), true);
+  assert.equal(canRename({ ...t1, inner: true }), false);
+  assert.equal(canRename({ ...t1, available: false }), false);
+  assert.deepEqual(renameAction(t1, "  New name  "), { name: "pane.rename", args: { pane: "p1", name: "New name" } });
+  assert.deepEqual(renameAction(t1, "   "), { name: "pane.rename", args: { pane: "p1", name: "" } });
+  assert.equal(renameAction(t2, "Other"), null);
 });

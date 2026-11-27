@@ -46,7 +46,20 @@ function setup(initial = {}, saved = {}) {
     } });
     return proxy;
   };
-  const input = { handlers: {}, text: "", on(event, callback) { this.handlers[event] = callback; }, value() { return this.text; }, set_value(v) { this.text = v; }, focus() {} };
+  const inputs = [];
+  let activeInput = null;
+  const makeInput = () => {
+    const inp = {
+      handlers: {}, text: "", selected: null,
+      on(event, callback) { this.handlers[event] = callback; },
+      value() { return this.text; },
+      set_value(v) { this.text = v; },
+      set_selected_range(r) { this.selected = r; },
+      focus() { activeInput = inp; },
+    };
+    inputs.push(inp);
+    return inp;
+  };
   const timers = [];
   const sharedState = {};
   // Tasks started with cx.spawn run when a launcher test awaits h.settle(). The sidebar's own
@@ -59,7 +72,7 @@ function setup(initial = {}, saved = {}) {
   const imports = {
     // svg's path is kept as props.src, so a test can tell glyphs apart.
     View: class {}, div: el, svg: path => el().src(path), image: el, h_flex: el, v_flex: el,
-    InputState: { new: () => input }, Input: { new: el }, ScrollHandle: { new: () => ({ scroll_to_item(i) { scrollTo = i; } }) },
+    InputState: { new: makeInput }, Input: { new: el }, ScrollHandle: { new: () => ({ scroll_to_item(i) { scrollTo = i; } }) },
     ...Object.fromEntries(Object.keys(state).map(k => [k, () => state[k]])),
     focused: () => state.focused, theme: () => new Proxy({}, { get: (_, key) => typeof key === "string" ? `#${key}` : undefined }), // each color names its key settings: () => ({ zoom: 1 }),
     run: (name, args) => commands.push({ name, args }), setAgentOrder: addresses => { order = addresses; }, nextCommand: () => new Promise(() => {}),
@@ -87,7 +100,7 @@ function setup(initial = {}, saved = {}) {
   // GPUI init receives its own props; Herdr supplies overlay props through herdr.props().
   view.init({}, cx);
   const settle = async () => { while (tasks.length) await tasks.shift()(cx); };
-  return { view, cx, input, state, commands, overlays, storage, timers, sharedState, execs, settle, hcs, notes, hcFails: stderr => { hcResult = { code: 1, stdout: "", stderr }; }, reads, file: text => { textFile = text; },
+  return { view, cx, get input() { return activeInput ?? inputs[0]; }, inputs, state, commands, overlays, storage, timers, sharedState, execs, settle, hcs, notes, hcFails: stderr => { hcResult = { code: 1, stdout: "", stderr }; }, reads, file: text => { textFile = text; },
     answer: f => { execResult = f; }, agents: list => { agentList = list; }, pick: path => { picked = path; },
     order: () => order, scrollTo: () => scrollTo, bound };
 }
@@ -1964,4 +1977,73 @@ test("asking for an organization leaves each machine's clock alone, so the looks
   await settle();
   assert.ok(h.view.asked instanceof Map);
   assert.doesNotThrow(() => h.view.probe(() => {}));
+});
+
+test("renaming a session opens an inline field, uses pane.rename for paned sessions, shared names otherwise, and supports F2 and Escape", () => {
+  const h = setup();
+  h.state.panes = [{ pane: "p1", terminal: "t1", tab: "tb1", title: "Local task", name: null }];
+  // Paned session: hover pencil opens inline rename field under the row, pre-filled and selected.
+  let root = hover(h, "agent-t1");
+  find(root, "rename-to-t1").props.on_click(null, h.cx);
+  root = h.view.render();
+  const list = find(root, "host-agent-list").nodes.map(n => n.props.id);
+  assert.equal(list[list.indexOf("agent-t1") + 1], "rename-t1");
+  assert.equal(h.input.text, "Local task");
+  assert.deepEqual(h.input.selected, { start: 0, end: "Local task".length });
+  // While renaming, Enter/Up/Down are the field's, not the list's.
+  h.view.selected = "work/t1";
+  for (const key of ["enter", "down", "up"]) h.view.render().props.on_key_down({ key }, h.cx);
+  assert.deepEqual([h.commands, h.view.selected, h.view.renaming], [[], "work/t1", "t1"]);
+  // Submitting calls pane.rename with trimmed text.
+  h.input.text = "  API cleanup  ";
+  h.input.handlers.submit(null, h.cx);
+  assert.deepEqual(h.commands, [{ name: "pane.rename", args: { pane: "p1", name: "API cleanup" } }]);
+  assert.equal(find(h.view.render(), "rename-t1"), null);
+  // Submitting empty resets the pane name.
+  find(hover(h, "agent-t1"), "rename-to-t1").props.on_click(null, h.cx);
+  h.input.text = "   ";
+  h.input.handlers.submit(null, h.cx);
+  assert.deepEqual(h.commands.at(-1), { name: "pane.rename", args: { pane: "p1", name: "" } });
+  // Session without a pane: stores in shared state and displays the new name, empty resets it.
+  find(hover(h, "agent-work/t1"), "rename-to-work/t1").props.on_click(null, h.cx);
+  h.input.text = "Prod deploy";
+  h.input.handlers.submit(null, h.cx);
+  assert.equal(h.sharedState["agent-sidebar.names"]["work/t1"], "Prod deploy");
+  assert.match(text(find(h.view.render(), "agent-work/t1")), /Prod deploy/);
+  find(hover(h, "agent-work/t1"), "rename-to-work/t1").props.on_click(null, h.cx);
+  assert.equal(h.input.text, "Prod deploy");
+  h.input.text = "";
+  h.input.handlers.submit(null, h.cx);
+  assert.equal(h.sharedState["agent-sidebar.names"]["work/t1"], undefined);
+  assert.match(text(find(h.view.render(), "agent-work/t1")), /Remote task/);
+  // F2 on a keyboard-selected row opens rename; Escape cancels without running anything.
+  const cmdsBefore = h.commands.length;
+  h.view.selected = "t1";
+  h.view.render().props.on_key_down({ key: "f2" }, h.cx);
+  assert.equal(h.view.renaming, "t1");
+  h.view.render().props.on_key_down({ key: "escape" }, h.cx);
+  assert.equal(h.view.renaming, null);
+  assert.equal(h.commands.length, cmdsBefore);
+  // Inner sub-agents cannot be renamed.
+  h.view.work = new Map([["t1", { at: Date.now(), subagents: [{ id: "sub1", type: "Explore", description: "Scan", started: Date.now() }] }]]);
+  assert.equal(find(hover(h, "agent-t1#sub1"), "rename-to-t1#sub1"), null);
+});
+
+test("row action buttons do not start a drag, and a released mouse never triggers Move here", () => {
+  const h = spaced();
+  let root = hover(h, "agent-t1");
+  // The hover action container stops left mouse-down propagation so clicking row buttons never starts a drag.
+  const bar = find(root, "agent-t1").nodes.find(n => find(n, "rename-to-t1"));
+  let stopped = false;
+  bar.props.on_mouse_down[1](null, { stop_propagation() { stopped = true; } });
+  assert.equal(stopped, true);
+  // If a press was started and the button was released elsewhere, a subsequent hover move clears drag instead of starting Move here.
+  find(root, "agent-t1").props.on_mouse_down[1]();
+  find(root, "section-local:space:s2").props.on_mouse_move({ pressed_button: undefined }, h.cx);
+  assert.equal(h.view.drag, null);
+  assert.equal(h.view.moving, null);
+  // Releasing on the sidebar root also clears any pending drag.
+  find(root, "agent-t1").props.on_mouse_down[1]();
+  root.props.on_mouse_up[1](null, h.cx);
+  assert.equal(h.view.drag, null);
 });

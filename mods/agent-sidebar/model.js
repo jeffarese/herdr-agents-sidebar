@@ -27,7 +27,7 @@ export const BACKGROUND = {
 
 const hiddenLabel = terminal => ["true", "1"].includes(terminal?.labels?.["herdr.hidden"]);
 
-export function build({ agents = [], terminals = [], panes = [], spaces = [], machines = [], focused = null, work = new Map(), now = Date.now() } = {}) {
+export function build({ agents = [], terminals = [], panes = [], spaces = [], machines = [], focused = null, work = new Map(), names = {}, now = Date.now() } = {}) {
   const hosts = new Map(machines.map(m => [m.name ?? null, m]));
   const placed = new Map(panes.filter(p => p.terminal).map(p => [p.terminal, p]));
   const listed = new Map(agents.map(a => [a.address, a]));
@@ -58,13 +58,14 @@ export function build({ agents = [], terminals = [], panes = [], spaces = [], ma
     const kind = agent ? "agent" : program?.shell || !program ? "shell" : "process";
     const cwd = pane?.cwd ?? terminal?.foreground?.cwd ?? terminal?.cwd ?? "";
     const status = statusOf(a?.status ?? terminal?.status ?? pane?.status ?? (agent ? null : "idle"));
+    const customName = (a?.pane_name ?? pane?.name ?? "").trim() || (pane ? "" : String(names?.[address] ?? "").trim());
     const named = terminal?.name || (tab?.named && taskTitle(tab.name, program, address));
-    const title = (!agent && named) || taskTitle(a?.title ?? pane?.title, program, address)
+    const title = customName || (!agent && named) || taskTitle(a?.title ?? pane?.title, program, address)
       || taskTitle(terminal?.report?.title ?? terminal?.title, program, address)
       || named || (agent ? a?.space_name || space?.name || program?.name || address
         : [program?.name || "Shell", basename(cwd)].filter(Boolean).join(" · "));
     rows.push({
-      address, machine, title, status, program, kind,
+      address, machine, title, customName: customName || null, status, program, kind,
       space: a?.space_name ?? space?.name ?? "",
       // Which space, and where it comes in Herdr's order, for grouping by space.
       spaceId: space?.id ?? null, spaceOrder: order.get(space?.id) ?? Infinity,
@@ -566,6 +567,15 @@ export function previewOf(rows, spaces, plan, skip = new Set()) {
 // A message can be sent to an agent that is not waiting on a dialog: typed into one, it would
 // answer it. Never to a shell, where it would run.
 export const canReply = row => Boolean(row?.available && row.kind === "agent" && !row.inner && row.reported !== "blocked");
+
+// Renaming a session: uses Herdr's pane.rename when it has a pane, or the sidebar's own
+// shared map when it runs without one (parked or background). Empty name resets to automatic.
+export const NAMES_KEY = "agent-sidebar.names";
+export const canRename = row => Boolean(row?.available && !row.inner);
+export function renameAction(row, name) {
+  if (!canRename(row) || !row.pane) return null;
+  return { name: "pane.rename", args: { pane: row.pane, name: String(name ?? "").trim() } };
+}
 
 // How busy a machine is (background.js parseStats), beside its name: CPU, memory and disk in
 // use, quiet until one runs high, then a warning (1) and worse (2) at herdr-stats' thresholds.
